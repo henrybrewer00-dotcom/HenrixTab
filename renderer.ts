@@ -2995,8 +2995,16 @@ function enterSwarmView() {
 
   const swarmView = document.getElementById("swarm-view")!;
   swarmView.style.display = "flex";
-  swarmView.style.flexDirection = "column";
-  swarmView.style.flex = "1";
+
+  // Show/hide empty state
+  updateSwarmEmptyState();
+}
+
+function updateSwarmEmptyState() {
+  const emptyEl = document.getElementById("swarm-empty");
+  if (emptyEl) {
+    emptyEl.style.display = swarmAgents.size === 0 ? "flex" : "none";
+  }
 }
 
 function exitSwarmView() {
@@ -3077,6 +3085,7 @@ function createSwarmNode(agent: SwarmAgent) {
     swarmAgents.delete(agent.id);
     node.remove();
     renderSwarmConnections();
+    updateSwarmEmptyState();
   });
 
   // Output port — start drawing connection
@@ -3178,14 +3187,17 @@ document.getElementById("swarm-exit")?.addEventListener("click", () => {
   exitSwarmView();
 });
 
-// Add agent button
-document.getElementById("swarm-add-agent")?.addEventListener("click", () => {
+// Add agent button (toolbar + get started button)
+function openAddAgentModal() {
   swarmAgentDir = "";
   (document.getElementById("swarm-agent-name") as HTMLInputElement).value = "";
   (document.getElementById("swarm-agent-dir") as HTMLInputElement).value = "";
   (document.getElementById("swarm-agent-prompt") as HTMLTextAreaElement).value = "";
   document.getElementById("swarm-agent-modal")?.classList.remove("hidden");
-});
+}
+
+document.getElementById("swarm-add-agent")?.addEventListener("click", openAddAgentModal);
+document.getElementById("swarm-get-started")?.addEventListener("click", openAddAgentModal);
 
 document.getElementById("swarm-agent-browse")?.addEventListener("click", async () => {
   const dir = await ipcRenderer.invoke("select-directory");
@@ -3224,6 +3236,7 @@ document.getElementById("swarm-agent-create")?.addEventListener("click", async (
 
   swarmAgents.set(agentId, agent);
   createSwarmNode(agent);
+  updateSwarmEmptyState();
 
   // Create a Claude Code session for this agent
   const config: SessionConfig = {

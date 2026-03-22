@@ -696,6 +696,13 @@
   }
 
   /* === Swarm Canvas === */
+  #swarm-canvas {
+    background-color: #0a0914;
+    background-image:
+      radial-gradient(circle, rgba(139, 92, 246, 0.06) 1px, transparent 1px);
+    background-size: 24px 24px;
+  }
+
   .swarm-node {
     position: absolute;
     width: 200px;

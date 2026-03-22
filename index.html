@@ -77,6 +77,42 @@
           </div>
           <div id="grid-cells" class="grid-cells-container"></div>
         </div>
+
+        <!-- Swarm Canvas View (inside main content) -->
+        <div id="swarm-view" class="flex-1" style="display: none; position: relative; flex-direction: column;">
+          <div id="swarm-toolbar" class="flex items-center justify-between px-3 py-1" style="background: rgba(139,92,246,0.06); border-bottom: 1px solid rgba(139,92,246,0.12);">
+            <div class="flex items-center space-x-3">
+              <span class="text-sm text-gray-300 font-medium">Swarm Canvas</span>
+              <button id="swarm-add-agent" class="text-xs px-2 py-1 rounded-md transition" style="background: rgba(139,92,246,0.2); color: #a78bfa; border: 1px solid rgba(139,92,246,0.3);">+ Add Agent</button>
+            </div>
+            <div class="flex items-center space-x-2">
+              <button id="swarm-grid-view" class="text-xs text-gray-400 hover:text-white px-2 py-1 rounded-md transition" style="background: rgba(255,255,255,0.06);">Grid View</button>
+              <button id="swarm-exit" class="text-xs text-gray-400 hover:text-red-400 px-2 py-1 rounded-md transition" style="background: rgba(255,255,255,0.06);">Exit Swarm</button>
+            </div>
+          </div>
+          <div style="position: relative; flex: 1; overflow: hidden;">
+            <svg id="swarm-connections" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 1;"></svg>
+            <div id="swarm-canvas" style="position: relative; width: 100%; height: 100%; overflow: auto; z-index: 2;">
+              <!-- Empty state / welcome -->
+              <div id="swarm-empty" style="position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; z-index: 0;">
+                <div style="text-align: center; max-width: 400px; animation: fadeIn 0.4s ease-out;">
+                  <div style="font-size: 48px; margin-bottom: 12px; opacity: 0.15;">&#128376;</div>
+                  <h2 style="color: #a78bfa; font-size: 22px; font-weight: 700; margin-bottom: 8px;">Swarm Mode</h2>
+                  <p style="color: #6b7280; font-size: 13px; line-height: 1.6; margin-bottom: 20px;">
+                    Create AI agents, place them on the canvas, and connect them together.
+                    When one agent finishes, its output flows to the next. Build chains, fan-outs,
+                    or full orchestration graphs.
+                  </p>
+                  <button id="swarm-get-started" class="btn-primary" style="padding: 8px 24px;">+ Add Your First Agent</button>
+                  <div style="margin-top: 16px; color: #4b5563; font-size: 11px;">
+                    Drag nodes to position &middot; Connect output &#8594; input ports &middot; Double-click to open terminal
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
       </div>
     </div>
 
@@ -452,22 +488,6 @@
           <button id="diff-merge" class="btn-primary">Merge to Parent</button>
         </div>
       </div>
-    </div>
-
-    <!-- Swarm Canvas View -->
-    <div id="swarm-view" class="flex-1 hidden" style="display: none; position: relative;">
-      <div id="swarm-toolbar" class="flex items-center justify-between px-3 py-1" style="background: rgba(139,92,246,0.06); border-bottom: 1px solid rgba(139,92,246,0.12);">
-        <div class="flex items-center space-x-3">
-          <span class="text-sm text-gray-300 font-medium">Swarm Canvas</span>
-          <button id="swarm-add-agent" class="text-xs px-2 py-1 rounded-md transition" style="background: rgba(139,92,246,0.2); color: #a78bfa; border: 1px solid rgba(139,92,246,0.3);">+ Add Agent</button>
-        </div>
-        <div class="flex items-center space-x-2">
-          <button id="swarm-grid-view" class="text-xs text-gray-400 hover:text-white px-2 py-1 rounded-md transition" style="background: rgba(255,255,255,0.06);">Grid View</button>
-          <button id="swarm-exit" class="text-xs text-gray-400 hover:text-red-400 px-2 py-1 rounded-md transition" style="background: rgba(255,255,255,0.06);">Exit Swarm</button>
-        </div>
-      </div>
-      <svg id="swarm-connections" style="position: absolute; top: 33px; left: 0; width: 100%; height: calc(100% - 33px); pointer-events: none; z-index: 1;"></svg>
-      <div id="swarm-canvas" style="position: relative; width: 100%; height: calc(100% - 33px); overflow: auto; z-index: 2;"></div>
     </div>
 
     <!-- Swarm Add Agent Modal -->
