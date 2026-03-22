@@ -10,7 +10,7 @@ import {promisify} from "util";
 import {v4 as uuidv4} from "uuid";
 import {getBranches} from "./git-utils";
 import {isTerminalReady} from "./terminal-utils";
-import {PersistedSession, SessionConfig, SessionType} from "./types";
+import {PersistedSession, PresetSlot, SessionConfig, SessionPreset, SessionType} from "./types";
 
 const execAsync = promisify(exec);
 
@@ -303,6 +303,16 @@ function spawnSessionPty(
             }
           } else if (config.codingAgent === "codex") {
             ptyProcess.write("codex\r");
+          } else if (config.codingAgent === "openrouter") {
+            // OpenRouter via Claude Code with OpenRouter API
+            const sessionFlag = isNewSession
+              ? `--session-id ${sessionUuid}`
+              : `--resume ${sessionUuid}`;
+            const skipPermissionsFlag = config.skipPermissions ? "--dangerously-skip-permissions" : "";
+            const flags = [sessionFlag, skipPermissionsFlag].filter(f => f).join(" ");
+            ptyProcess.write(`claude ${flags}\r`);
+          } else if (config.codingAgent === "custom" && config.customCommand) {
+            ptyProcess.write(config.customCommand + "\r");
           }
         }
       }
@@ -579,6 +589,47 @@ ipcMain.on("delete-session", async (_event, sessionId: string) => {
   savePersistedSessions(sessions);
 
   mainWindow.webContents.send("session-deleted", sessionId);
+});
+
+// Delete all sessions in a preset group
+ipcMain.on("delete-group", async (_event, groupId: string) => {
+  const sessions = getPersistedSessions();
+  const groupSessions = sessions.filter(s => s.config.presetGroupId === groupId);
+
+  for (const session of groupSessions) {
+    // Kill PTY if active
+    const ptyProcess = activePtyProcesses.get(session.id);
+    if (ptyProcess) {
+      ptyProcess.kill();
+      activePtyProcesses.delete(session.id);
+    }
+
+    // Kill MCP poller if active
+    const mcpPoller = mcpPollerPtyProcesses.get(session.id);
+    if (mcpPoller) {
+      mcpPoller.kill();
+      mcpPollerPtyProcesses.delete(session.id);
+    }
+
+    // Clean up worktree if needed
+    if (session.config.sessionType === SessionType.WORKTREE && session.worktreePath) {
+      await removeWorktree(session.config.projectDir, session.worktreePath);
+      if (session.gitBranch) {
+        await removeGitBranch(session.config.projectDir, session.gitBranch);
+      }
+    }
+  }
+
+  // Remove all group sessions from store
+  const remaining = sessions.filter(s => s.config.presetGroupId !== groupId);
+  savePersistedSessions(remaining);
+
+  // Notify renderer of each deleted session
+  groupSessions.forEach(s => {
+    mainWindow.webContents.send("session-deleted", s.id);
+  });
+
+  mainWindow.webContents.send("group-deleted", groupId);
 });
 
 // Get all persisted sessions
@@ -868,6 +919,76 @@ ipcMain.handle("get-mcp-server-details", async (_event, name: string) => {
   }
 });
 
+// Preset management
+function getPresets(): SessionPreset[] {
+  return (store as any).get("presets", []) as SessionPreset[];
+}
+
+function savePresets(presets: SessionPreset[]) {
+  (store as any).set("presets", presets);
+}
+
+ipcMain.handle("get-presets", () => {
+  return getPresets();
+});
+
+ipcMain.handle("save-preset", (_event, preset: SessionPreset) => {
+  const presets = getPresets();
+  const existingIndex = presets.findIndex(p => p.id === preset.id);
+  if (existingIndex >= 0) {
+    presets[existingIndex] = preset;
+  } else {
+    presets.push(preset);
+  }
+  savePresets(presets);
+  return presets;
+});
+
+ipcMain.handle("delete-preset", (_event, presetId: string) => {
+  const presets = getPresets().filter(p => p.id !== presetId);
+  savePresets(presets);
+  return presets;
+});
+
+// Clear all sessions and data
+ipcMain.handle("clear-all-sessions", async () => {
+  // Kill all active PTY processes
+  activePtyProcesses.forEach((ptyProcess) => {
+    try { ptyProcess.kill(); } catch (_e) { /* ignore */ }
+  });
+  activePtyProcesses.clear();
+
+  // Kill all MCP poller processes
+  mcpPollerPtyProcesses.forEach((ptyProcess) => {
+    try { ptyProcess.kill(); } catch (_e) { /* ignore */ }
+  });
+  mcpPollerPtyProcesses.clear();
+
+  // Kill claude command runner
+  if (claudeCommandRunnerPty) {
+    try { claudeCommandRunnerPty.kill(); } catch (_e) { /* ignore */ }
+    claudeCommandRunnerPty = null;
+  }
+
+  // Remove all worktrees
+  const sessions = getPersistedSessions();
+  for (const session of sessions) {
+    if (session.config.sessionType === SessionType.WORKTREE && session.worktreePath) {
+      await removeWorktree(session.config.projectDir, session.worktreePath).catch(() => {});
+      if (session.gitBranch) {
+        await removeGitBranch(session.config.projectDir, session.gitBranch).catch(() => {});
+      }
+    }
+  }
+
+  // Clear all stored data
+  savePersistedSessions([]);
+  savePresets([]);
+  (store as any).delete("lastSessionConfig");
+
+  return true;
+});
+
 const createWindow = () => {
   mainWindow = new BrowserWindow({
     width: 1400,
@@ -879,6 +1000,42 @@ const createWindow = () => {
   });
 
   mainWindow.loadFile("index.html");
+
+  // Intercept keyboard shortcuts before the page/xterm swallows them
+  mainWindow.webContents.on("before-input-event", (event, input) => {
+    const shortcutsEnabled = (store as any).get("shortcutsEnabled", null);
+    // null = not yet asked, true = enabled, false = disabled
+    if (shortcutsEnabled === false) return;
+
+    if ((input.meta || input.control) && input.type === "keyDown") {
+      if (input.key >= "1" && input.key <= "9") {
+        event.preventDefault();
+        if (shortcutsEnabled === null) {
+          mainWindow.webContents.send("shortcut-permission-prompt");
+        } else {
+          mainWindow.webContents.send("shortcut-switch-tab", parseInt(input.key) - 1);
+        }
+      } else if (input.key === "g") {
+        event.preventDefault();
+        if (shortcutsEnabled === null) {
+          mainWindow.webContents.send("shortcut-permission-prompt");
+        } else {
+          mainWindow.webContents.send("shortcut-toggle-grid");
+        }
+      } else if (input.key === "b") {
+        event.preventDefault();
+        mainWindow.webContents.send("shortcut-toggle-sidebar");
+      }
+    }
+  });
+
+  ipcMain.handle("set-shortcuts-enabled", (_event, enabled: boolean) => {
+    (store as any).set("shortcutsEnabled", enabled);
+  });
+
+  ipcMain.handle("get-shortcuts-enabled", () => {
+    return (store as any).get("shortcutsEnabled", null);
+  });
 
   // Load persisted sessions once window is ready
   mainWindow.webContents.on("did-finish-load", () => {

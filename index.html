@@ -2,7 +2,7 @@
 <html>
   <head>
     <meta charset="UTF-8" />
-    <title>FleetCode Terminal</title>
+    <title>HenrixCode</title>
     <link rel="stylesheet" href="node_modules/xterm/css/xterm.css" />
     <link rel="stylesheet" href="dist/styles.css" />
     <style>
@@ -13,20 +13,29 @@
       }
     </style>
   </head>
-  <body class="h-screen overflow-hidden bg-gray-900">
+  <body class="h-screen overflow-hidden" style="background: #0a0914;">
     <div class="flex h-full">
+      <!-- Sidebar toggle (visible when sidebar is hidden) -->
+      <button id="sidebar-show" class="sidebar-show-btn" title="Show sidebar (Cmd+B)">&#9776;</button>
+
       <!-- Sidebar -->
-      <div class="sidebar">
+      <div class="sidebar" id="sidebar">
         <div class="sidebar-header">
-          <h1 class="sidebar-title">FleetCode</h1>
-          <button id="open-settings" class="settings-btn" title="Settings">⚙️</button>
+          <h1 class="sidebar-title">Henrix<span style="color: #8b5cf6;">Code</span></h1>
+          <div class="flex items-center space-x-1">
+            <button id="open-settings" class="settings-btn" title="Settings">⚙️</button>
+            <button id="sidebar-hide" class="settings-btn" title="Hide sidebar (Cmd+B)" style="font-size: 14px;">&#9666;</button>
+          </div>
         </div>
 
         <div class="sidebar-content">
           <div class="sidebar-section">
             <div class="sidebar-section-header">
               <div class="sidebar-section-title">SESSIONS</div>
-              <button id="new-session" class="section-add-btn" title="New Session">+</button>
+              <div class="flex items-center space-x-1">
+                <button id="open-presets" class="section-add-btn" title="Launch Preset" style="font-size: 10px; width: auto; padding: 0 4px;">Presets</button>
+                <button id="new-session" class="section-add-btn" title="New Session">+</button>
+              </div>
             </div>
             <div id="session-list"></div>
           </div>
@@ -42,12 +51,133 @@
       </div>
 
       <!-- Main content -->
-      <div class="flex-1 flex flex-col bg-black">
-        <!-- Tabs -->
+      <div class="flex-1 flex flex-col" style="background: #0a0914;">
+        <!-- Tabs (normal mode) -->
         <div id="tabs" class="tabs-container"></div>
 
-        <!-- Session container -->
+        <!-- Session container (normal tab mode - one at a time) -->
         <div id="session-container" class="flex-1 relative"></div>
+
+        <!-- Grid view (preset launch mode - all visible) -->
+        <div id="grid-view" class="flex-1 hidden" style="display: none;">
+          <div id="grid-toolbar" class="flex items-center justify-between px-3 py-1" style="background: rgba(139,92,246,0.06); border-bottom: 1px solid rgba(139,92,246,0.12);">
+            <span id="grid-title" class="text-sm text-gray-300 font-medium"></span>
+            <div class="flex items-center space-x-2">
+              <span class="text-xs text-gray-600">Cmd+1-9 focus &middot; Cmd+G toggle &middot; dbl-click expand &middot; drag to move</span>
+              <button id="grid-to-tabs" class="text-xs text-gray-400 hover:text-white px-2 py-1 rounded-md transition" style="background: rgba(255,255,255,0.06);">Split to Tabs</button>
+              <button id="grid-exit" class="text-xs text-gray-400 hover:text-red-400 px-2 py-1 rounded-md transition" style="background: rgba(255,255,255,0.06);">Exit Grid</button>
+            </div>
+          </div>
+          <div id="grid-cells" class="grid-cells-container"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Preset Launcher Modal -->
+    <div id="preset-launcher-modal" class="modal-overlay hidden">
+      <div class="modal" style="max-width: 600px;">
+        <h2 class="modal-title">Launch Preset</h2>
+
+        <div class="form-group">
+          <label class="form-label">Saved Presets</label>
+          <div id="preset-list" class="space-y-2">
+            <div class="text-sm text-gray-500">No presets saved yet. Create one below.</div>
+          </div>
+        </div>
+
+        <hr class="border-gray-700 my-4" />
+
+        <h3 class="text-sm font-semibold text-white mb-3">Create New Preset</h3>
+
+        <div class="form-group">
+          <label class="form-label">Preset Name</label>
+          <input type="text" id="preset-name-input" class="form-input" placeholder="e.g., My Workflow" />
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Project Directory</label>
+          <div class="directory-input-group">
+            <input type="text" id="preset-project-dir" class="form-input" readonly placeholder="Select a directory..." />
+            <button id="preset-browse-dir" class="btn-icon">Browse</button>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Session Type</label>
+          <select id="preset-session-type" class="form-select">
+            <option value="local">Local</option>
+            <option value="worktree">Worktree</option>
+          </select>
+        </div>
+
+        <div class="form-group" id="preset-parent-branch-group" style="display: none;">
+          <label class="form-label">Parent Branch</label>
+          <select id="preset-parent-branch" class="form-select">
+            <option value="">Select branch...</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Terminal Slots</label>
+          <div class="flex items-center space-x-3 mb-3">
+            <input type="number" id="preset-slot-count" class="form-input" style="width: 60px;" min="1" max="20" value="4" />
+            <button id="preset-update-slots" class="btn-icon text-xs">Update</button>
+          </div>
+          <div class="flex flex-wrap gap-1 mb-3">
+            <span class="text-xs text-gray-500 mr-1 self-center">Fill all:</span>
+            <button class="preset-fill-btn text-xs px-2 py-1 rounded hover:opacity-80 transition" data-agent="claude" style="background: #8b5cf622; color: #8b5cf6; border: 1px solid #8b5cf6;">Claude Code</button>
+            <button class="preset-fill-btn text-xs px-2 py-1 rounded hover:opacity-80 transition" data-agent="codex" style="background: #10b98122; color: #10b981; border: 1px solid #10b981;">Codex</button>
+            <button class="preset-fill-btn text-xs px-2 py-1 rounded hover:opacity-80 transition" data-agent="openrouter" style="background: #f59e0b22; color: #f59e0b; border: 1px solid #f59e0b;">OpenRouter</button>
+          </div>
+          <div id="preset-grid" class="grid grid-cols-4 gap-2">
+            <!-- Slot boxes get rendered here — click a box to change its agent -->
+          </div>
+          <span class="text-xs text-gray-500 mt-2 block">Click any box to change its agent</span>
+        </div>
+
+        <div class="form-group">
+          <label class="flex items-center space-x-2 cursor-pointer">
+            <input type="checkbox" id="preset-yolo-mode" class="form-checkbox" checked />
+            <span class="text-sm text-gray-300">Yolo Mode (skip all permissions)</span>
+          </label>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">Setup Commands (optional, run before each agent)</label>
+          <textarea id="preset-setup-commands" class="form-input" rows="2" placeholder="e.g., source .env"></textarea>
+        </div>
+
+        <div class="btn-group">
+          <button id="preset-cancel" class="btn-secondary">Cancel</button>
+          <button id="preset-save" class="btn-primary">Save Preset</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Slot Config Popup (inline, appears on clicking a grid box) -->
+    <div id="slot-config-popup" class="modal-overlay hidden">
+      <div class="modal" style="max-width: 340px;">
+        <h2 class="modal-title">Configure Slot</h2>
+
+        <div class="form-group">
+          <label class="form-label">Agent</label>
+          <select id="slot-agent-select" class="form-select">
+            <option value="claude">Claude Code</option>
+            <option value="codex">Codex</option>
+            <option value="openrouter">OpenRouter</option>
+            <option value="custom">Custom Command</option>
+          </select>
+        </div>
+
+        <div class="form-group hidden" id="slot-custom-cmd-group">
+          <label class="form-label">Custom Command</label>
+          <input type="text" id="slot-custom-cmd" class="form-input" placeholder="e.g., aider --model gpt-4" />
+        </div>
+
+        <div class="btn-group">
+          <button id="slot-config-cancel" class="btn-secondary">Cancel</button>
+          <button id="slot-config-ok" class="btn-primary">OK</button>
+        </div>
       </div>
     </div>
 
@@ -247,8 +377,21 @@
           <span class="text-xs text-gray-400 mt-1 block">Directory where session worktrees will be stored</span>
         </div>
 
-        <div class="text-center text-xs text-gray-500 mt-6 pt-4 border-t border-gray-700">
-          <span id="app-version">FleetCode v...</span>
+        <div class="form-group">
+          <label class="flex items-center space-x-2 cursor-pointer">
+            <input type="checkbox" id="settings-shortcuts" class="form-checkbox" checked />
+            <span class="text-sm text-gray-300">Keyboard Shortcuts (Cmd+1-9, Cmd+G)</span>
+          </label>
+        </div>
+
+        <div class="form-group mt-6 pt-4 border-t border-gray-700">
+          <label class="form-label text-red-400">Danger Zone</label>
+          <button id="clear-all-sessions" class="btn-danger w-full">Clear All Sessions & Data</button>
+          <span class="text-xs text-gray-500 mt-1 block">Kills all terminals, deletes all sessions, presets, and worktrees</span>
+        </div>
+
+        <div class="text-center text-xs text-gray-500 mt-4 pt-4 border-t border-gray-700">
+          <span id="app-version">HenrixCode v...</span>
         </div>
 
         <div class="btn-group">

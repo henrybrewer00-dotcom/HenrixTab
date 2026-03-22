@@ -1,5 +1,5 @@
 {
-  "name": "fleetcode",
+  "name": "henrixcode",
   "version": "1.0.1-beta.8",
   "description": "Run multiple CLI coding agents at once",
   "main": "dist/main.js",
@@ -43,8 +43,8 @@
     "xterm": "^5.3.0"
   },
   "build": {
-    "appId": "com.fleetcode.app",
-    "productName": "FleetCode",
+    "appId": "com.henrixcode.app",
+    "productName": "HenrixCode",
     "files": [
       "dist/**/*",
       "index.html",

@@ -1,7 +1,7 @@
 import {FitAddon} from "@xterm/addon-fit";
 import {ipcRenderer} from "electron";
 import {Terminal} from "xterm";
-import {PersistedSession, SessionConfig, SessionType} from "./types";
+import {PersistedSession, PresetSlot, SessionConfig, SessionPreset, SessionType} from "./types";
 import {isClaudeSessionReady} from "./terminal-utils";
 import * as path from "path";
 
@@ -14,6 +14,15 @@ interface Session {
   config: SessionConfig;
   worktreePath?: string;
   hasActivePty: boolean;
+  presetGroupId?: string;
+}
+
+interface PresetGroup {
+  id: string;
+  name: string;
+  sessionIds: string[];
+  collapsed: boolean;
+  slots: PresetSlot[];
 }
 
 interface McpServer {
@@ -217,6 +226,16 @@ let terminalSettings: TerminalSettings = { ...DEFAULT_SETTINGS };
 // Track activity timers for each session
 const activityTimers = new Map<string, NodeJS.Timeout>();
 
+// Grid view state
+let gridViewActive = false;
+let gridSessionIds: string[] = [];
+let focusedGridCell: string | null = null;
+let gridLaunching = false; // true while preset is creating sessions
+let activeGridGroupId: string | null = null; // which group is currently in grid view
+
+// Preset group tracking
+const presetGroups = new Map<string, PresetGroup>();
+
 async function loadAndPopulateBranches(
   directory: string,
   selectedBranch?: string
@@ -240,12 +259,12 @@ async function loadAndPopulateBranches(
   }
 }
 
-function createTerminalUI(sessionId: string) {
+function createTerminalUI(sessionId: string, targetContainer?: HTMLElement) {
   const themeColors = THEME_PRESETS[terminalSettings.theme] || THEME_PRESETS["macos-dark"];
 
   const term = new Terminal({
     cursorBlink: terminalSettings.cursorBlink,
-    fontSize: terminalSettings.fontSize,
+    fontSize: targetContainer ? Math.max(9, terminalSettings.fontSize - 2) : terminalSettings.fontSize,
     fontFamily: terminalSettings.fontFamily,
     theme: themeColors,
   });
@@ -254,10 +273,10 @@ function createTerminalUI(sessionId: string) {
   term.loadAddon(fitAddon);
 
   const sessionElement = document.createElement("div");
-  sessionElement.className = "session-wrapper";
+  sessionElement.className = targetContainer ? "grid-cell-terminal" : "session-wrapper";
   sessionElement.id = `session-${sessionId}`;
 
-  const container = document.getElementById("session-container");
+  const container = targetContainer || document.getElementById("session-container");
   if (container) {
     container.appendChild(sessionElement);
   }
@@ -276,7 +295,16 @@ function createTerminalUI(sessionId: string) {
   });
 
   const resizeHandler = () => {
-    if (activeSessionId === sessionId) {
+    if (gridViewActive && gridSessionIds.includes(sessionId)) {
+      // In grid mode, fit all grid terminals
+      try {
+        fitAddon.fit();
+        const dims = fitAddon.proposeDimensions();
+        if (dims) {
+          ipcRenderer.send("session-resize", sessionId, dims.cols, dims.rows);
+        }
+      } catch (_e) { /* terminal may not be visible yet */ }
+    } else if (activeSessionId === sessionId) {
       const proposedDimensions = fitAddon.proposeDimensions();
       if (proposedDimensions) {
         fitAddon.fit();
@@ -290,6 +318,7 @@ function createTerminalUI(sessionId: string) {
 }
 
 function addSession(persistedSession: PersistedSession, hasActivePty: boolean) {
+  const groupId = persistedSession.config.presetGroupId;
   const session: Session = {
     id: persistedSession.id,
     terminal: null,
@@ -299,15 +328,38 @@ function addSession(persistedSession: PersistedSession, hasActivePty: boolean) {
     config: persistedSession.config,
     worktreePath: persistedSession.worktreePath,
     hasActivePty,
+    presetGroupId: groupId,
   };
 
   sessions.set(persistedSession.id, session);
 
-  // Add to sidebar
-  addToSidebar(persistedSession.id, persistedSession.name, hasActivePty, persistedSession.config);
+  if (groupId) {
+    // Add to group — sidebar item goes inside the folder
+    const group = presetGroups.get(groupId);
+    if (group) {
+      if (!group.sessionIds.includes(persistedSession.id)) {
+        group.sessionIds.push(persistedSession.id);
+      }
+    } else {
+      // Group not created yet — create it on the fly
+      const newGroup: PresetGroup = {
+        id: groupId,
+        name: persistedSession.config.presetGroupName || "Preset Group",
+        sessionIds: [persistedSession.id],
+        collapsed: false,
+        slots: [],
+      };
+      presetGroups.set(groupId, newGroup);
+      renderSidebarFolder(newGroup);
+    }
+    addToSidebarInFolder(persistedSession.id, persistedSession.name, hasActivePty, groupId);
+  } else {
+    // Normal session — add directly to sidebar
+    addToSidebar(persistedSession.id, persistedSession.name, hasActivePty, persistedSession.config);
+  }
 
-  // Only add tab if terminal is active
-  if (hasActivePty) {
+  // Only add tab if terminal is active and NOT in grid mode
+  if (hasActivePty && !gridLaunching) {
     addTab(persistedSession.id, persistedSession.name);
   }
 
@@ -350,6 +402,237 @@ function updateSessionState(sessionId: string, isActive: boolean) {
     }
   }
 }
+
+// === Sidebar Folder (Preset Group) Functions ===
+
+function renderSidebarFolder(group: PresetGroup) {
+  const list = document.getElementById("session-list");
+  if (!list) return;
+
+  // Don't duplicate
+  if (document.getElementById(`folder-${group.id}`)) return;
+
+  const folder = document.createElement("div");
+  folder.id = `folder-${group.id}`;
+  folder.className = "sidebar-folder";
+
+  const header = document.createElement("div");
+  header.className = "sidebar-folder-header";
+  header.innerHTML = `
+    <div class="flex items-center space-x-2 flex-1 min-w-0 cursor-pointer folder-toggle" data-id="${group.id}">
+      <span class="folder-arrow ${group.collapsed ? '' : 'open'}">&#9654;</span>
+      <span class="truncate text-sm text-gray-200 font-medium">${group.name}</span>
+      <span class="text-xs text-gray-500">(${group.sessionIds.length})</span>
+    </div>
+    <div class="flex items-center space-x-1">
+      <button class="folder-grid-btn section-add-btn" data-id="${group.id}" title="Grid View" style="font-size: 9px; width: auto; padding: 0 3px;">Grid</button>
+      <button class="folder-delete-btn section-add-btn" data-id="${group.id}" title="Delete All" style="color: #f87171;">&times;</button>
+    </div>
+  `;
+
+  const children = document.createElement("div");
+  children.className = "sidebar-folder-children";
+  children.id = `folder-children-${group.id}`;
+  if (group.collapsed) {
+    children.style.display = "none";
+  }
+
+  folder.appendChild(header);
+  folder.appendChild(children);
+  list.appendChild(folder);
+
+  // Toggle collapse
+  header.querySelector(".folder-toggle")?.addEventListener("click", () => {
+    group.collapsed = !group.collapsed;
+    const arrow = header.querySelector(".folder-arrow");
+    if (group.collapsed) {
+      children.style.display = "none";
+      arrow?.classList.remove("open");
+    } else {
+      children.style.display = "";
+      arrow?.classList.add("open");
+    }
+  });
+
+  // Grid view button
+  header.querySelector(".folder-grid-btn")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    enterGridViewForGroup(group.id);
+  });
+
+  // Delete all button
+  header.querySelector(".folder-delete-btn")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (!confirm(`Delete all sessions in "${group.name}"?`)) return;
+    deleteGroup(group.id);
+  });
+}
+
+function addToSidebarInFolder(sessionId: string, name: string, hasActivePty: boolean, groupId: string) {
+  const container = document.getElementById(`folder-children-${groupId}`);
+  if (!container) return;
+
+  const item = document.createElement("div");
+  item.id = `sidebar-${sessionId}`;
+  item.className = "session-list-item folder-session-item";
+  item.innerHTML = `
+    <div class="flex items-center space-x-2 flex-1 session-name-container">
+      <span class="session-indicator ${hasActivePty ? 'active' : ''}"></span>
+      <span class="truncate session-name-text text-xs" data-id="${sessionId}">${name}</span>
+    </div>
+  `;
+
+  item.addEventListener("click", () => {
+    handleSessionClick(sessionId);
+  });
+
+  container.appendChild(item);
+}
+
+function updateFolderCount(groupId: string) {
+  const folder = document.getElementById(`folder-${groupId}`);
+  if (!folder) return;
+  const group = presetGroups.get(groupId);
+  if (!group) return;
+  const countEl = folder.querySelector(".sidebar-folder-header .text-xs.text-gray-500");
+  if (countEl) {
+    countEl.textContent = `(${group.sessionIds.length})`;
+  }
+}
+
+function deleteGroup(groupId: string) {
+  const group = presetGroups.get(groupId);
+  if (!group) return;
+
+  // If in grid view for this group, exit first
+  if (gridViewActive && activeGridGroupId === groupId) {
+    gridViewActive = false;
+    document.getElementById("tabs")!.style.display = "";
+    document.getElementById("session-container")!.style.display = "";
+    const gridView = document.getElementById("grid-view")!;
+    gridView.style.display = "none";
+    gridView.classList.add("hidden");
+    document.getElementById("grid-cells")!.innerHTML = "";
+    gridSessionIds = [];
+    focusedGridCell = null;
+    activeGridGroupId = null;
+  }
+
+  // Close all sessions in group from UI
+  group.sessionIds.forEach(sid => {
+    const session = sessions.get(sid);
+    if (session) {
+      if (session.element) session.element.remove();
+      if (session.terminal) session.terminal.dispose();
+      document.getElementById(`tab-${sid}`)?.remove();
+      document.getElementById(`sidebar-${sid}`)?.remove();
+      sessions.delete(sid);
+    }
+  });
+
+  // Remove folder from sidebar
+  document.getElementById(`folder-${groupId}`)?.remove();
+
+  // Tell main process to delete all sessions in this group
+  ipcRenderer.send("delete-group", groupId);
+
+  presetGroups.delete(groupId);
+}
+
+function enterGridViewForGroup(groupId: string) {
+  const group = presetGroups.get(groupId);
+  if (!group || group.sessionIds.length === 0) return;
+
+  // Check that sessions have active PTYs — reopen if needed
+  const needsReopen: string[] = [];
+  group.sessionIds.forEach(sid => {
+    const session = sessions.get(sid);
+    if (session && !session.hasActivePty) {
+      needsReopen.push(sid);
+    }
+  });
+
+  activeGridGroupId = groupId;
+  gridViewActive = true;
+  gridSessionIds = [...group.sessionIds];
+  focusedGridCell = null;
+
+  // Hide normal view, show grid
+  document.getElementById("tabs")!.style.display = "none";
+  document.getElementById("session-container")!.style.display = "none";
+  const gridView = document.getElementById("grid-view")!;
+  gridView.style.display = "flex";
+  gridView.style.flexDirection = "column";
+  gridView.style.flex = "1";
+  gridView.classList.remove("hidden");
+
+  document.getElementById("grid-title")!.textContent = `${group.name} — ${group.sessionIds.length} terminals`;
+
+  const cols = Math.ceil(Math.sqrt(group.sessionIds.length));
+  const rows = Math.ceil(group.sessionIds.length / cols);
+  const gridCells = document.getElementById("grid-cells")!;
+  gridCells.innerHTML = "";
+  gridCells.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+  gridCells.style.gridTemplateRows = `repeat(${rows}, 1fr)`;
+
+  // First pass: clean up all existing terminals and create grid cell containers
+  group.sessionIds.forEach((sid, index) => {
+    const session = sessions.get(sid);
+    if (!session) return;
+
+    // Clean up existing terminal
+    if (session.element) session.element.remove();
+    if (session.terminal) session.terminal.dispose();
+    session.terminal = null;
+    session.fitAddon = null;
+    session.element = null;
+
+    // Remove tab
+    document.getElementById(`tab-${sid}`)?.remove();
+
+    // Create empty grid cell (terminal created after layout)
+    const agentType = session.config.codingAgent as PresetSlot["agent"];
+    const slot: PresetSlot = { agent: agentType, customCommand: session.config.customCommand };
+    const cell = createGridCell(sid, slot, index);
+    gridCells.appendChild(cell);
+  });
+
+  // Wait for the grid to be laid out, then create terminals inside cells
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      group.sessionIds.forEach((sid) => {
+        const session = sessions.get(sid);
+        if (!session) return;
+
+        const cell = document.getElementById(`grid-cell-${sid}`);
+        if (!cell) return;
+
+        // Create terminal inside grid cell
+        const ui = createTerminalUI(sid, cell);
+        session.terminal = ui.terminal;
+        session.fitAddon = ui.fitAddon;
+        session.element = ui.element;
+
+        // Reopen PTY if needed
+        if (!session.hasActivePty) {
+          ipcRenderer.send("reopen-session", sid);
+          session.hasActivePty = true;
+          updateSessionState(sid, true);
+        }
+      });
+
+      // Fit all after terminals are created
+      setTimeout(() => {
+        fitAllGridTerminals();
+        if (gridSessionIds.length > 0) {
+          focusGridCell(gridSessionIds[0]);
+        }
+      }, 100);
+    });
+  });
+}
+
+// === End Folder Functions ===
 
 function addToSidebar(sessionId: string, name: string, hasActivePty: boolean, config: SessionConfig) {
   const list = document.getElementById("session-list");
@@ -795,6 +1078,9 @@ ipcRenderer.on("session-output", (_event, sessionId: string, data: string) => {
 
 // Handle session created
 ipcRenderer.on("session-created", (_event, sessionId: string, persistedSession: any) => {
+  // Skip if grid launcher is handling this
+  if (gridLaunching) return;
+
   const session = addSession(persistedSession, true);
   activateSession(sessionId);
 
@@ -842,6 +1128,20 @@ ipcRenderer.on("session-reopened", (_event, sessionId: string) => {
 ipcRenderer.on("session-deleted", (_event, sessionId: string) => {
   const session = sessions.get(sessionId);
   if (session) {
+    // Remove from its group if it belongs to one
+    if (session.presetGroupId) {
+      const group = presetGroups.get(session.presetGroupId);
+      if (group) {
+        group.sessionIds = group.sessionIds.filter(id => id !== sessionId);
+        updateFolderCount(session.presetGroupId);
+        // If group is now empty, remove the folder
+        if (group.sessionIds.length === 0) {
+          document.getElementById(`folder-${session.presetGroupId}`)?.remove();
+          presetGroups.delete(session.presetGroupId);
+        }
+      }
+    }
+
     if (session.element) session.element.remove();
     if (session.terminal) session.terminal.dispose();
     document.getElementById(`tab-${sessionId}`)?.remove();
@@ -859,10 +1159,45 @@ ipcRenderer.on("session-deleted", (_event, sessionId: string) => {
   }
 });
 
+// Handle group deletion from main process
+ipcRenderer.on("group-deleted", (_event, groupId: string) => {
+  document.getElementById(`folder-${groupId}`)?.remove();
+  presetGroups.delete(groupId);
+});
+
 // Load persisted sessions on startup
 ipcRenderer.on("load-persisted-sessions", (_event, persistedSessions: PersistedSession[]) => {
+  // First pass: identify all preset groups
+  const groupNames = new Map<string, string>();
+  persistedSessions.forEach(ps => {
+    const gid = ps.config.presetGroupId;
+    if (gid && !groupNames.has(gid)) {
+      const name = ps.config.presetGroupName || "Preset Group";
+      groupNames.set(gid, name);
+    }
+  });
+
+  // Create group objects and render folders before adding sessions
+  groupNames.forEach((name, gid) => {
+    const group: PresetGroup = {
+      id: gid,
+      name,
+      sessionIds: [],
+      collapsed: true,
+      slots: [],
+    };
+    presetGroups.set(gid, group);
+    renderSidebarFolder(group);
+  });
+
+  // Second pass: add all sessions (they'll go into folders or sidebar)
   persistedSessions.forEach(ps => {
     addSession(ps, false);
+  });
+
+  // Update folder counts
+  groupNames.forEach((_name, gid) => {
+    updateFolderCount(gid);
   });
 });
 
@@ -887,6 +1222,711 @@ const branchNameHelp = document.getElementById("branch-name-help");
 
 let selectedDirectory = "";
 let existingBranches: string[] = [];
+
+// Preset Launcher
+let loadedPresets: SessionPreset[] = [];
+let presetSlots: PresetSlot[] = [];
+let editingSlotIndex = -1;
+let presetProjectDir = "";
+
+const AGENT_LABELS: Record<string, string> = {
+  claude: "Claude Code",
+  codex: "Codex",
+  openrouter: "OpenRouter",
+  custom: "Custom",
+};
+
+const AGENT_COLORS: Record<string, string> = {
+  claude: "#8b5cf6",
+  codex: "#10b981",
+  openrouter: "#f59e0b",
+  custom: "#6b7280",
+};
+
+async function loadPresets() {
+  loadedPresets = await ipcRenderer.invoke("get-presets");
+}
+
+function renderPresetList() {
+  const listEl = document.getElementById("preset-list");
+  if (!listEl) return;
+
+  if (loadedPresets.length === 0) {
+    listEl.innerHTML = '<div class="text-sm text-gray-500">No presets saved yet. Create one below.</div>';
+    return;
+  }
+
+  listEl.innerHTML = "";
+  loadedPresets.forEach(preset => {
+    const item = document.createElement("div");
+    item.className = "flex items-center justify-between bg-gray-700 rounded p-3 cursor-pointer hover:bg-gray-600 transition";
+
+    // Build slot summary
+    const slotCounts: Record<string, number> = {};
+    preset.slots.forEach(s => {
+      const label = AGENT_LABELS[s.agent] || s.agent;
+      slotCounts[label] = (slotCounts[label] || 0) + 1;
+    });
+    const summary = Object.entries(slotCounts).map(([k, v]) => `${v}x ${k}`).join(", ");
+    const dirName = path.basename(preset.projectDir);
+
+    item.innerHTML = `
+      <div class="flex-1 min-w-0">
+        <div class="text-sm font-medium text-white truncate">${preset.name}</div>
+        <div class="text-xs text-gray-400 truncate">${dirName} &mdash; ${summary}</div>
+        <div class="text-xs text-gray-500">${preset.yoloMode ? "Yolo mode" : "Normal mode"} &middot; ${preset.slots.length} terminals</div>
+      </div>
+      <div class="flex items-center space-x-2 ml-3">
+        <button class="preset-launch-btn btn-primary text-xs" style="padding: 4px 12px;" data-id="${preset.id}">Launch</button>
+        <button class="preset-delete-btn text-gray-500 hover:text-red-400 text-lg" data-id="${preset.id}" title="Delete">&times;</button>
+      </div>
+    `;
+
+    // Launch button
+    item.querySelector(".preset-launch-btn")?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      launchPreset(preset);
+    });
+
+    // Delete button
+    item.querySelector(".preset-delete-btn")?.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      if (!confirm(`Delete preset "${preset.name}"?`)) return;
+      loadedPresets = await ipcRenderer.invoke("delete-preset", preset.id);
+      renderPresetList();
+    });
+
+    listEl.appendChild(item);
+  });
+}
+
+function renderPresetGrid() {
+  const gridEl = document.getElementById("preset-grid");
+  if (!gridEl) return;
+
+  // Determine grid columns based on slot count
+  const count = presetSlots.length;
+  let cols = 4;
+  if (count <= 2) cols = 2;
+  else if (count <= 4) cols = 4;
+  else if (count <= 6) cols = 3;
+  else if (count <= 9) cols = 3;
+  else cols = 4;
+
+  gridEl.className = `grid gap-2`;
+  gridEl.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+
+  gridEl.innerHTML = "";
+  presetSlots.forEach((slot, index) => {
+    const box = document.createElement("div");
+    const color = AGENT_COLORS[slot.agent] || "#6b7280";
+    const label = slot.agent === "custom" && slot.customCommand
+      ? slot.customCommand.split(" ")[0]
+      : AGENT_LABELS[slot.agent];
+
+    box.className = "rounded p-3 text-center cursor-pointer transition hover:opacity-80";
+    box.style.cssText = `border: 2px solid ${color}; background: ${color}22; min-height: 60px; display: flex; flex-direction: column; align-items: center; justify-content: center;`;
+    box.innerHTML = `
+      <div class="text-xs font-bold" style="color: ${color};">${label}</div>
+      <div class="text-xs text-gray-500 mt-1">Slot ${index + 1}</div>
+    `;
+
+    box.addEventListener("click", () => {
+      editingSlotIndex = index;
+      openSlotConfigPopup(slot);
+    });
+
+    gridEl.appendChild(box);
+  });
+}
+
+function openSlotConfigPopup(slot: PresetSlot) {
+  const popup = document.getElementById("slot-config-popup");
+  const agentSelect = document.getElementById("slot-agent-select") as HTMLSelectElement;
+  const customGroup = document.getElementById("slot-custom-cmd-group");
+  const customInput = document.getElementById("slot-custom-cmd") as HTMLInputElement;
+
+  agentSelect.value = slot.agent;
+  customInput.value = slot.customCommand || "";
+  customGroup?.classList.toggle("hidden", slot.agent !== "custom");
+
+  popup?.classList.remove("hidden");
+}
+
+function initPresetSlots(count: number) {
+  // Preserve existing assignments where possible
+  const oldSlots = [...presetSlots];
+  presetSlots = [];
+  for (let i = 0; i < count; i++) {
+    if (i < oldSlots.length) {
+      presetSlots.push(oldSlots[i]);
+    } else {
+      presetSlots.push({ agent: "claude" });
+    }
+  }
+  renderPresetGrid();
+}
+
+function enterGridView(presetName: string, slotCount: number) {
+  gridViewActive = true;
+  gridSessionIds = [];
+  focusedGridCell = null;
+
+  // Hide normal view, show grid
+  document.getElementById("tabs")!.style.display = "none";
+  document.getElementById("session-container")!.style.display = "none";
+  const gridView = document.getElementById("grid-view")!;
+  gridView.style.display = "flex";
+  gridView.style.flexDirection = "column";
+  gridView.style.flex = "1";
+  gridView.classList.remove("hidden");
+
+  // Set title
+  document.getElementById("grid-title")!.textContent = `${presetName} — ${slotCount} terminals`;
+
+  // Calculate grid dimensions
+  const cols = Math.ceil(Math.sqrt(slotCount));
+  const rows = Math.ceil(slotCount / cols);
+  const gridCells = document.getElementById("grid-cells")!;
+  gridCells.innerHTML = "";
+  gridCells.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+  gridCells.style.gridTemplateRows = `repeat(${rows}, 1fr)`;
+}
+
+function exitGridView() {
+  gridViewActive = false;
+  expandedCellId = null;
+
+  // Show normal view, hide grid
+  document.getElementById("tabs")!.style.display = "";
+  document.getElementById("session-container")!.style.display = "";
+  const gridView = document.getElementById("grid-view")!;
+  gridView.style.display = "none";
+  gridView.classList.add("hidden");
+
+  // Move grid session terminals back to normal session-container
+  gridSessionIds.forEach(sid => {
+    const session = sessions.get(sid);
+    if (session) {
+      // Remove old grid element
+      if (session.element) {
+        session.element.remove();
+      }
+      if (session.terminal) {
+        session.terminal.dispose();
+      }
+      session.terminal = null;
+      session.fitAddon = null;
+      session.element = null;
+
+      // Recreate in normal container
+      const ui = createTerminalUI(sid);
+      session.terminal = ui.terminal;
+      session.fitAddon = ui.fitAddon;
+      session.element = ui.element;
+    }
+  });
+
+  // Switch to the first grid session in tab mode
+  if (gridSessionIds.length > 0) {
+    gridSessionIds.forEach(sid => {
+      const session = sessions.get(sid);
+      if (session && !document.getElementById(`tab-${sid}`)) {
+        addTab(sid, session.name);
+      }
+    });
+    switchToSession(gridSessionIds[0]);
+  }
+
+  // Keep the group intact — just clear grid state
+  gridSessionIds = [];
+  focusedGridCell = null;
+  activeGridGroupId = null;
+}
+
+let expandedCellId: string | null = null;
+
+function createGridCell(sessionId: string, slot: PresetSlot, index: number): HTMLElement {
+  const color = AGENT_COLORS[slot.agent] || "#6b7280";
+  const label = slot.agent === "custom" && slot.customCommand
+    ? slot.customCommand.split(" ")[0]
+    : AGENT_LABELS[slot.agent];
+
+  const cell = document.createElement("div");
+  cell.className = "grid-cell";
+  cell.id = `grid-cell-${sessionId}`;
+  cell.setAttribute("draggable", "true");
+  cell.dataset.sessionId = sessionId;
+
+  const header = document.createElement("div");
+  header.className = "grid-cell-header";
+  header.innerHTML = `
+    <span class="grid-cell-label" style="color: ${color};">
+      <span class="drag-handle" title="Drag to reorder" style="cursor: grab; margin-right: 4px; opacity: 0.4;">&#9776;</span>
+      ${label} #${index + 1}
+    </span>
+    <div class="flex items-center" style="gap: 6px;">
+      <button class="grid-expand-btn" title="Expand (double-click)" style="font-size: 10px; color: #666; cursor: pointer; background: none; border: none; padding: 0;">&#9634;</button>
+    </div>
+  `;
+
+  // Click header to focus this cell
+  header.addEventListener("click", (e) => {
+    if (!(e.target as HTMLElement).classList.contains("grid-expand-btn")) {
+      focusGridCell(sessionId);
+    }
+  });
+
+  // Expand button — toggle full-screen for this cell
+  header.querySelector(".grid-expand-btn")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    toggleExpandCell(sessionId);
+  });
+
+  // Double-click anywhere on cell to expand
+  cell.addEventListener("dblclick", () => {
+    toggleExpandCell(sessionId);
+  });
+
+  // Drag and drop for reordering
+  cell.addEventListener("dragstart", (e) => {
+    e.dataTransfer?.setData("text/plain", sessionId);
+    e.dataTransfer!.effectAllowed = "move";
+
+    // Create a styled drag preview
+    const preview = document.createElement("div");
+    preview.style.cssText = `
+      background: linear-gradient(135deg, #1e1b2e, #16132a);
+      border: 2px solid ${color};
+      border-radius: 8px;
+      padding: 10px 16px;
+      color: ${color};
+      font-size: 12px;
+      font-weight: 700;
+      font-family: -apple-system, sans-serif;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.5), 0 0 12px ${color}44;
+      position: absolute;
+      top: -1000px;
+      white-space: nowrap;
+    `;
+    preview.textContent = `${label} #${index + 1}`;
+    document.body.appendChild(preview);
+    e.dataTransfer?.setDragImage(preview, preview.offsetWidth / 2, preview.offsetHeight / 2);
+    setTimeout(() => preview.remove(), 0);
+
+    cell.style.opacity = "0.3";
+    cell.style.transform = "scale(0.95)";
+  });
+
+  cell.addEventListener("dragend", () => {
+    cell.style.opacity = "1";
+    cell.style.transform = "";
+    // Clear all drag-over highlights
+    document.querySelectorAll(".grid-cell").forEach(c => {
+      (c as HTMLElement).style.borderColor = "";
+      (c as HTMLElement).style.background = "";
+    });
+  });
+
+  cell.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    e.dataTransfer!.dropEffect = "move";
+    cell.style.borderColor = "#8b5cf6";
+    cell.style.background = "rgba(139, 92, 246, 0.08)";
+  });
+
+  cell.addEventListener("dragleave", () => {
+    cell.style.borderColor = "";
+    cell.style.background = "";
+  });
+
+  cell.addEventListener("drop", (e) => {
+    e.preventDefault();
+    cell.style.borderColor = "";
+    cell.style.background = "";
+    const draggedId = e.dataTransfer?.getData("text/plain");
+    if (!draggedId || draggedId === sessionId) return;
+    swapGridCells(draggedId, sessionId);
+  });
+
+  cell.appendChild(header);
+  return cell;
+}
+
+function toggleExpandCell(sessionId: string) {
+  const gridCells = document.getElementById("grid-cells")!;
+
+  if (expandedCellId === sessionId) {
+    // Collapse — restore grid
+    expandedCellId = null;
+    gridSessionIds.forEach(sid => {
+      const c = document.getElementById(`grid-cell-${sid}`);
+      if (c) {
+        c.style.display = "";
+      }
+    });
+    // Restore grid template
+    const count = gridSessionIds.length;
+    const cols = Math.ceil(Math.sqrt(count));
+    const rows = Math.ceil(count / cols);
+    gridCells.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+    gridCells.style.gridTemplateRows = `repeat(${rows}, 1fr)`;
+    setTimeout(fitAllGridTerminals, 50);
+  } else {
+    // Expand — hide all other cells, make this one fill
+    expandedCellId = sessionId;
+    gridSessionIds.forEach(sid => {
+      const c = document.getElementById(`grid-cell-${sid}`);
+      if (c) {
+        c.style.display = sid === sessionId ? "" : "none";
+      }
+    });
+    gridCells.style.gridTemplateColumns = "1fr";
+    gridCells.style.gridTemplateRows = "1fr";
+    focusGridCell(sessionId);
+    setTimeout(() => {
+      const session = sessions.get(sessionId);
+      if (session?.fitAddon) {
+        session.fitAddon.fit();
+        const dims = session.fitAddon.proposeDimensions();
+        if (dims) {
+          ipcRenderer.send("session-resize", sessionId, dims.cols, dims.rows);
+        }
+      }
+    }, 50);
+  }
+}
+
+function swapGridCells(draggedId: string, targetId: string) {
+  // Swap positions in gridSessionIds
+  const fromIdx = gridSessionIds.indexOf(draggedId);
+  const toIdx = gridSessionIds.indexOf(targetId);
+  if (fromIdx === -1 || toIdx === -1) return;
+
+  gridSessionIds[fromIdx] = targetId;
+  gridSessionIds[toIdx] = draggedId;
+
+  // Also swap in the group
+  if (activeGridGroupId) {
+    const group = presetGroups.get(activeGridGroupId);
+    if (group) {
+      const gi = group.sessionIds.indexOf(draggedId);
+      const gj = group.sessionIds.indexOf(targetId);
+      if (gi !== -1 && gj !== -1) {
+        group.sessionIds[gi] = targetId;
+        group.sessionIds[gj] = draggedId;
+      }
+    }
+  }
+
+  // Swap DOM elements
+  const gridCells = document.getElementById("grid-cells")!;
+  const draggedCell = document.getElementById(`grid-cell-${draggedId}`);
+  const targetCell = document.getElementById(`grid-cell-${targetId}`);
+  if (!draggedCell || !targetCell) return;
+
+  // Use a placeholder to swap
+  const placeholder = document.createElement("div");
+  gridCells.insertBefore(placeholder, draggedCell);
+  gridCells.insertBefore(draggedCell, targetCell);
+  gridCells.insertBefore(targetCell, placeholder);
+  gridCells.removeChild(placeholder);
+
+  setTimeout(fitAllGridTerminals, 50);
+}
+
+function focusGridCell(sessionId: string) {
+  // Remove focus from all cells
+  document.querySelectorAll(".grid-cell").forEach(c => c.classList.remove("focused"));
+
+  // Focus this cell
+  const cell = document.getElementById(`grid-cell-${sessionId}`);
+  cell?.classList.add("focused");
+  focusedGridCell = sessionId;
+
+  // Focus the terminal so keystrokes go to it
+  const session = sessions.get(sessionId);
+  if (session?.terminal) {
+    session.terminal.focus();
+  }
+}
+
+function fitAllGridTerminals() {
+  gridSessionIds.forEach(sid => {
+    const session = sessions.get(sid);
+    if (session?.fitAddon && session?.terminal) {
+      try {
+        session.fitAddon.fit();
+        const dims = session.fitAddon.proposeDimensions();
+        if (dims) {
+          ipcRenderer.send("session-resize", sid, dims.cols, dims.rows);
+        }
+      } catch (_e) { /* ignore */ }
+    }
+  });
+}
+
+async function launchPreset(preset: SessionPreset) {
+  // Close the preset launcher modal
+  document.getElementById("preset-launcher-modal")?.classList.add("hidden");
+
+  gridLaunching = true;
+
+  // Create a preset group
+  const groupId = `group-${Date.now()}`;
+  const group: PresetGroup = {
+    id: groupId,
+    name: preset.name,
+    sessionIds: [],
+    collapsed: false,
+    slots: [...preset.slots],
+  };
+  presetGroups.set(groupId, group);
+  activeGridGroupId = groupId;
+
+  // Render the folder in sidebar
+  renderSidebarFolder(group);
+
+  // Enter grid view
+  enterGridView(preset.name, preset.slots.length);
+
+  const gridCells = document.getElementById("grid-cells")!;
+
+  // Create all sessions and grid cells
+  for (let i = 0; i < preset.slots.length; i++) {
+    const slot = preset.slots[i];
+    const config: SessionConfig = {
+      projectDir: preset.projectDir,
+      sessionType: preset.sessionType,
+      parentBranch: preset.parentBranch,
+      codingAgent: slot.agent,
+      skipPermissions: preset.yoloMode,
+      setupCommands: preset.setupCommands,
+      customCommand: slot.customCommand,
+      presetGroupId: groupId,
+      presetGroupName: preset.name,
+    };
+
+    const sessionId = await new Promise<string>((resolve) => {
+      const handler = (_event: any, sid: string, persistedSession: any) => {
+        ipcRenderer.removeListener("session-created", handler);
+
+        // Create the grid cell
+        const cell = createGridCell(sid, slot, i);
+        gridCells.appendChild(cell);
+
+        // Add session to our map (this also adds to folder sidebar)
+        const session = addSession(persistedSession, true);
+
+        // Create terminal inside the grid cell
+        const ui = createTerminalUI(sid, cell);
+        session.terminal = ui.terminal;
+        session.fitAddon = ui.fitAddon;
+        session.element = ui.element;
+
+        gridSessionIds.push(sid);
+
+        // Update sidebar state
+        updateSessionState(sid, true);
+
+        resolve(sid);
+      };
+
+      ipcRenderer.on("session-created", handler);
+      ipcRenderer.send("create-session", config);
+    });
+
+    // Small delay for stability
+    if (i < preset.slots.length - 1) {
+      await new Promise(r => setTimeout(r, 200));
+    }
+  }
+
+  gridLaunching = false;
+
+  // Update folder count
+  updateFolderCount(groupId);
+
+  // Fit all terminals after grid is fully built
+  setTimeout(() => {
+    fitAllGridTerminals();
+    if (gridSessionIds.length > 0) {
+      focusGridCell(gridSessionIds[0]);
+    }
+  }, 300);
+}
+
+// Open Presets button
+document.getElementById("open-presets")?.addEventListener("click", async () => {
+  await loadPresets();
+  renderPresetList();
+
+  // Reset the builder form
+  presetSlots = [];
+  presetProjectDir = "";
+  initPresetSlots(4);
+  (document.getElementById("preset-name-input") as HTMLInputElement).value = "";
+  (document.getElementById("preset-project-dir") as HTMLInputElement).value = "";
+  (document.getElementById("preset-slot-count") as HTMLInputElement).value = "4";
+  (document.getElementById("preset-yolo-mode") as HTMLInputElement).checked = true;
+  (document.getElementById("preset-setup-commands") as HTMLTextAreaElement).value = "";
+  const presetSessionType = document.getElementById("preset-session-type") as HTMLSelectElement;
+  presetSessionType.value = "local";
+  document.getElementById("preset-parent-branch-group")!.style.display = "none";
+
+  document.getElementById("preset-launcher-modal")?.classList.remove("hidden");
+});
+
+// Preset builder: browse directory
+document.getElementById("preset-browse-dir")?.addEventListener("click", async () => {
+  const dir = await ipcRenderer.invoke("select-directory");
+  if (dir) {
+    presetProjectDir = dir;
+    const dirName = path.basename(dir);
+    (document.getElementById("preset-project-dir") as HTMLInputElement).value = `(${dirName}) ${dir}`;
+
+    // Load branches for worktree mode
+    const branches = await ipcRenderer.invoke("get-branches", dir);
+    const branchSelect = document.getElementById("preset-parent-branch") as HTMLSelectElement;
+    branchSelect.innerHTML = "";
+    branches.forEach((branch: string) => {
+      const option = document.createElement("option");
+      option.value = branch;
+      option.textContent = branch;
+      branchSelect.appendChild(option);
+    });
+  }
+});
+
+// Preset builder: session type toggle
+document.getElementById("preset-session-type")?.addEventListener("change", (e) => {
+  const val = (e.target as HTMLSelectElement).value;
+  document.getElementById("preset-parent-branch-group")!.style.display = val === "worktree" ? "block" : "none";
+});
+
+// Preset builder: fill all slots with one agent
+document.querySelectorAll(".preset-fill-btn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    const agent = (btn as HTMLElement).dataset.agent as PresetSlot["agent"];
+    presetSlots = presetSlots.map(() => ({ agent }));
+    renderPresetGrid();
+  });
+});
+
+// Preset builder: update slot count
+document.getElementById("preset-update-slots")?.addEventListener("click", () => {
+  const count = parseInt((document.getElementById("preset-slot-count") as HTMLInputElement).value) || 4;
+  initPresetSlots(Math.min(Math.max(count, 1), 20));
+});
+
+// Slot config popup: agent change
+document.getElementById("slot-agent-select")?.addEventListener("change", (e) => {
+  const val = (e.target as HTMLSelectElement).value;
+  document.getElementById("slot-custom-cmd-group")?.classList.toggle("hidden", val !== "custom");
+});
+
+// Slot config popup: OK
+document.getElementById("slot-config-ok")?.addEventListener("click", () => {
+  if (editingSlotIndex >= 0 && editingSlotIndex < presetSlots.length) {
+    const agent = (document.getElementById("slot-agent-select") as HTMLSelectElement).value as PresetSlot["agent"];
+    const customCmd = (document.getElementById("slot-custom-cmd") as HTMLInputElement).value.trim();
+    presetSlots[editingSlotIndex] = {
+      agent,
+      customCommand: agent === "custom" ? customCmd : undefined,
+    };
+    renderPresetGrid();
+  }
+  document.getElementById("slot-config-popup")?.classList.add("hidden");
+});
+
+// Slot config popup: Cancel
+document.getElementById("slot-config-cancel")?.addEventListener("click", () => {
+  document.getElementById("slot-config-popup")?.classList.add("hidden");
+});
+
+// Preset builder: Cancel
+document.getElementById("preset-cancel")?.addEventListener("click", () => {
+  document.getElementById("preset-launcher-modal")?.classList.add("hidden");
+});
+
+// Preset builder: Save
+document.getElementById("preset-save")?.addEventListener("click", async () => {
+  const name = (document.getElementById("preset-name-input") as HTMLInputElement).value.trim();
+  if (!name) { alert("Please enter a preset name"); return; }
+  if (!presetProjectDir) { alert("Please select a project directory"); return; }
+
+  const sessionType = (document.getElementById("preset-session-type") as HTMLSelectElement).value as SessionType;
+  const parentBranch = sessionType === SessionType.WORKTREE
+    ? (document.getElementById("preset-parent-branch") as HTMLSelectElement).value
+    : undefined;
+  const yoloMode = (document.getElementById("preset-yolo-mode") as HTMLInputElement).checked;
+  const setupText = (document.getElementById("preset-setup-commands") as HTMLTextAreaElement).value.trim();
+  const setupCommands = setupText ? setupText.split("\n").filter(c => c.trim()) : undefined;
+
+  const preset: SessionPreset = {
+    id: `preset-${Date.now()}`,
+    name,
+    projectDir: presetProjectDir,
+    sessionType,
+    parentBranch,
+    slots: [...presetSlots],
+    yoloMode,
+    setupCommands,
+  };
+
+  loadedPresets = await ipcRenderer.invoke("save-preset", preset);
+  renderPresetList();
+
+  // Reset builder
+  (document.getElementById("preset-name-input") as HTMLInputElement).value = "";
+  alert(`Preset "${name}" saved! Click Launch to start it.`);
+});
+
+// Global resize handler for grid view
+let gridResizeTimer: NodeJS.Timeout | null = null;
+window.addEventListener("resize", () => {
+  if (gridViewActive) {
+    if (gridResizeTimer) clearTimeout(gridResizeTimer);
+    gridResizeTimer = setTimeout(fitAllGridTerminals, 100);
+  }
+});
+
+// Grid view toolbar handlers
+document.getElementById("grid-to-tabs")?.addEventListener("click", () => {
+  exitGridView();
+});
+
+document.getElementById("grid-exit")?.addEventListener("click", () => {
+  if (!confirm("Close all grid terminals?")) return;
+
+  const groupId = activeGridGroupId;
+  gridViewActive = false;
+
+  // Hide grid, show normal
+  document.getElementById("tabs")!.style.display = "";
+  document.getElementById("session-container")!.style.display = "";
+  const gridView = document.getElementById("grid-view")!;
+  gridView.style.display = "none";
+  gridView.classList.add("hidden");
+  document.getElementById("grid-cells")!.innerHTML = "";
+
+  // Delete the entire group if it exists
+  if (groupId) {
+    deleteGroup(groupId);
+  } else {
+    const idsToClose = [...gridSessionIds];
+    idsToClose.forEach(sid => closeSession(sid));
+  }
+
+  gridSessionIds = [];
+  focusedGridCell = null;
+  activeGridGroupId = null;
+});
+
+// Load presets on startup
+loadPresets();
 
 // Validate branch name
 function validateBranchName(): boolean {
@@ -1438,6 +2478,7 @@ const settingsFontFamily = document.getElementById("settings-font-family") as HT
 const settingsFontSize = document.getElementById("settings-font-size") as HTMLInputElement;
 const settingsCursorBlink = document.getElementById("settings-cursor-blink") as HTMLInputElement;
 const settingsWorktreeDir = document.getElementById("settings-worktree-dir") as HTMLInputElement;
+const settingsShortcuts = document.getElementById("settings-shortcuts") as HTMLInputElement;
 const browseWorktreeDirBtn = document.getElementById("browse-worktree-dir");
 
 // Load saved settings on startup
@@ -1491,11 +2532,15 @@ function applySettingsToAllTerminals() {
 openSettingsBtn?.addEventListener("click", async () => {
   populateSettingsForm();
 
+  // Load shortcuts setting
+  const shortcutsEnabled = await ipcRenderer.invoke("get-shortcuts-enabled");
+  settingsShortcuts.checked = shortcutsEnabled !== false;
+
   // Load and display app version
   const version = await ipcRenderer.invoke("get-app-version");
   const versionElement = document.getElementById("app-version");
   if (versionElement) {
-    versionElement.textContent = `FleetCode v${version}`;
+    versionElement.textContent = `HenrixCode v${version}`;
   }
 
   settingsModal?.classList.remove("hidden");
@@ -1531,6 +2576,9 @@ saveSettingsBtn?.addEventListener("click", async () => {
 
   // Save to electron-store
   await ipcRenderer.invoke("save-terminal-settings", terminalSettings);
+
+  // Save shortcuts setting
+  await ipcRenderer.invoke("set-shortcuts-enabled", settingsShortcuts.checked);
 
   // Apply to all existing terminals
   applySettingsToAllTerminals();
@@ -1581,6 +2629,27 @@ confirmApplyToProjectBtn?.addEventListener("click", async () => {
   }
 });
 
+// Sidebar toggle
+function toggleSidebar() {
+  const sidebar = document.getElementById("sidebar")!;
+  const showBtn = document.getElementById("sidebar-show")!;
+  const isCollapsed = sidebar.classList.contains("collapsed");
+
+  if (isCollapsed) {
+    sidebar.classList.remove("collapsed");
+    showBtn.classList.remove("visible");
+  } else {
+    sidebar.classList.add("collapsed");
+    showBtn.classList.add("visible");
+  }
+
+  // Refit active terminal after sidebar animation
+  setTimeout(() => window.dispatchEvent(new Event("resize")), 300);
+}
+
+document.getElementById("sidebar-hide")?.addEventListener("click", toggleSidebar);
+document.getElementById("sidebar-show")?.addEventListener("click", toggleSidebar);
+
 // Close session menus when clicking outside
 document.addEventListener("click", (e) => {
   const target = e.target as HTMLElement;
@@ -1588,5 +2657,95 @@ document.addEventListener("click", (e) => {
     document.querySelectorAll(".session-menu").forEach(menu => {
       menu.classList.add("hidden");
     });
+  }
+});
+
+// Clear All Sessions button
+document.getElementById("clear-all-sessions")?.addEventListener("click", async () => {
+  if (!confirm("This will permanently delete ALL sessions, presets, and worktrees. Are you sure?")) return;
+
+  const btn = document.getElementById("clear-all-sessions") as HTMLButtonElement;
+  btn.textContent = "Clearing...";
+  btn.disabled = true;
+
+  try {
+    await ipcRenderer.invoke("clear-all-sessions");
+
+    // Clear all UI state
+    sessions.forEach((session) => {
+      if (session.element) session.element.remove();
+      if (session.terminal) session.terminal.dispose();
+    });
+    sessions.clear();
+    presetGroups.clear();
+    loadedPresets = [];
+    gridSessionIds = [];
+    gridViewActive = false;
+    activeSessionId = null;
+    activeGridGroupId = null;
+
+    // Clear DOM
+    document.getElementById("session-list")!.innerHTML = "";
+    document.getElementById("tabs")!.innerHTML = "";
+    document.getElementById("grid-cells")!.innerHTML = "";
+    document.getElementById("mcp-server-list")!.innerHTML = "";
+
+    // Reset view
+    document.getElementById("tabs")!.style.display = "";
+    document.getElementById("session-container")!.style.display = "";
+    const gridView = document.getElementById("grid-view")!;
+    gridView.style.display = "none";
+    gridView.classList.add("hidden");
+
+    const mcpSection = document.getElementById("mcp-section");
+    if (mcpSection) mcpSection.style.display = "none";
+
+    settingsModal?.classList.add("hidden");
+  } catch (error) {
+    alert(`Error: ${error}`);
+  } finally {
+    btn.textContent = "Clear All Sessions & Data";
+    btn.disabled = false;
+  }
+});
+
+// Permission prompt for keyboard shortcuts
+ipcRenderer.on("shortcut-permission-prompt", async () => {
+  const yes = confirm(
+    "Enable keyboard shortcuts?\n\n" +
+    "Cmd+1-9: Switch between tabs/grid cells\n" +
+    "Cmd+G: Toggle grid view\n\n" +
+    "You can change this in Settings."
+  );
+  await ipcRenderer.invoke("set-shortcuts-enabled", yes);
+});
+
+// Keyboard shortcuts via main process (bypasses xterm capturing)
+ipcRenderer.on("shortcut-switch-tab", (_event, index: number) => {
+  if (gridViewActive) {
+    if (index < gridSessionIds.length) {
+      focusGridCell(gridSessionIds[index]);
+    }
+  } else {
+    const tabs = document.querySelectorAll("#tabs .tab");
+    if (index < tabs.length) {
+      const tabId = tabs[index].id.replace("tab-", "");
+      switchToSession(tabId);
+    }
+  }
+});
+
+ipcRenderer.on("shortcut-toggle-sidebar", () => {
+  toggleSidebar();
+});
+
+ipcRenderer.on("shortcut-toggle-grid", () => {
+  if (gridViewActive) {
+    exitGridView();
+  } else {
+    const active = activeSessionId ? sessions.get(activeSessionId) : null;
+    if (active?.presetGroupId) {
+      enterGridViewForGroup(active.presetGroupId);
+    }
   }
 });

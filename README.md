@@ -1,100 +1,138 @@
-# FleetCode
+# HenrixTab
 
-![FleetCode](fleetcode.png)
+Run multiple AI coding agents (Claude Code, Codex, OpenRouter, custom) in parallel — all in one window.
 
-A desktop terminal application for running multiple CLI coding agents simultaneously, each in isolated git worktrees.
+Built on and inspired by [FleetCode](https://github.com/built-by-as/FleetCode) by [@built-by-as](https://github.com/built-by-as).
+
+---
 
 ## Features
 
-- **Multiple Sessions**: Run multiple coding agent sessions (Claude, Codex) in parallel
-- **Git Worktree Isolation**: Each session runs in its own git worktree, keeping work isolated
-- **Persistent Sessions**: Sessions persist across app restarts with automatic resumption
-- **Terminal Theming**: Choose from preset themes (macOS Light/Dark, Solarized Dark, Dracula, One Dark, GitHub Dark)
-- **Setup Commands**: Configure shell commands to run before the coding agent starts
-- **MCP Server Management**: Add and configure Model Context Protocol (MCP) servers
-- **Session Management**: Rename, close, and delete sessions with automatic worktree cleanup
+- **Presets** — Save configurations with multiple terminal slots, pick agents for each, and launch them all at once
+- **Grid View** — See all your terminals side by side in one window. Double-click to expand one, drag to reorder
+- **Folders** — Preset sessions are grouped into collapsible folders in the sidebar. Delete the folder to kill them all
+- **Yolo Mode** — Launch all agents with `--dangerously-skip-permissions` in one click
+- **Keyboard Shortcuts** — `Cmd+1-9` switch tabs/cells, `Cmd+G` toggle grid, `Cmd+B` toggle sidebar
+- **Agents** — Claude Code, Codex, OpenRouter, or any custom CLI command
+- **Git Worktrees** — Each session gets its own isolated branch
+- **Collapsible Sidebar** — Hide it for more terminal space
+- **Themes** — Dracula, One Dark, Solarized, GitHub Dark, macOS, and more
+- **MCP Server Management** — Add/remove MCP servers per session
+- **Session Persistence** — Sessions survive app restarts
 
-## Prerequisites
+---
 
-- Node.js 16+
-- Git
-- Claude CLI (`npm install -g @anthropic-ai/claude-cli`) or Codex
+## Install
 
-## Installation
+### Prerequisites
+
+- **Node.js** 18+ — [download here](https://nodejs.org/)
+- **Git**
+- **Claude Code** and/or **Codex** CLI installed globally
+
+### Steps
 
 ```bash
+git clone https://github.com/henrybrewer00-dotcom/HenrixTab.git
+cd HenrixTab
 npm install
-```
-
-## Usage
-
-### Development
-
-```bash
-npm run dev
-```
-
-### Production Build
-
-```bash
-npm run build
+npx electron-rebuild
 npm start
 ```
 
-## How It Works
+### Build a .app / .dmg (macOS)
 
-### Session Creation
+```bash
+npm run dist
+```
 
-1. Select a project directory (must be a git repository)
-2. Choose a parent branch for the worktree
-3. Select your coding agent (Claude or Codex)
-4. Optionally add setup commands (e.g., environment variables, source files)
-5. FleetCode creates a new git worktree and spawns a terminal session
+The built app will be in the `dist/` folder.
 
-### Session Management
-
-- **New Sessions**: Use `--session-id <uuid>` for first-time Claude sessions
-- **Reopened Sessions**: Automatically resume with `--resume <uuid>`
-- **Worktrees**: Each session gets its own isolated git worktree
-- **Persistence**: Sessions are saved and can be reopened after closing the app
-
-### Terminal Settings
-
-Access settings via the gear icon (⚙️) in the sidebar:
-
-- **Font Family**: Choose from common monospace fonts
-- **Font Size**: Adjust terminal text size
-- **Theme**: Select from preset color themes
-- **Cursor Blink**: Toggle cursor blinking
-
-### MCP Servers
-
-Configure Model Context Protocol servers for enhanced agent capabilities:
-
-- **stdio**: Direct process communication
-- **SSE**: Server-sent events via HTTP
+---
 
 ## Troubleshooting
 
-### macOS: "App can't be opened because it is from an unidentified developer"
+### "App is damaged" / Quarantine warning (macOS)
 
-If you encounter a quarantine warning when trying to open the app on macOS, run:
+macOS quarantines apps downloaded from the internet or built locally. To fix:
 
 ```bash
-xattr -cr /path/to/FleetCode.app
+xattr -cr /path/to/HenrixTab.app
 ```
 
-This removes the quarantine attribute that prevents the app from opening.
+If running from source and you get a quarantine error on `node-pty`:
 
-### Claude Code: Working Directory Issues
+```bash
+xattr -cr node_modules/node-pty
+npx electron-rebuild
+```
 
-If you're using Claude Code and it's reading/writing files from the wrong directory instead of the worktree, disable "Auto connect to IDE" in your Claude Code settings:
+### `node-pty` compiled against a different Node.js version
+
+This means your Node.js version doesn't match Electron's native module version. Fix:
+
+```bash
+npx electron-rebuild
+```
+
+### Blank white grid cells
+
+If grid cells appear blank when entering grid view, resize the window to force a re-fit. You can also exit grid and re-enter via the folder's **Grid** button in the sidebar.
+
+### `claude` or `codex` command not found
+
+Install the CLI tools globally first:
+
+```bash
+# Claude Code
+npm install -g @anthropic-ai/claude-code
+
+# Codex (OpenAI)
+npm install -g @openai/codex
+```
+
+### App won't start / crashes on launch
+
+Nuclear option — clean reinstall:
+
+```bash
+rm -rf node_modules dist
+npm install
+npx electron-rebuild
+npm start
+```
+
+### Claude Code reading/writing files from wrong directory
+
+Disable auto IDE connection in Claude Code settings:
 
 ```bash
 claude config
 ```
 
-Set `autoConnectToIde` to `false`. This ensures Claude Code operates within the correct worktree directory.
+Set `autoConnectToIde` to `false` so Claude operates within the correct worktree directory.
+
+---
+
+## Keyboard Shortcuts
+
+| Shortcut | Action |
+|----------|--------|
+| `Cmd+1` through `Cmd+9` | Switch to Nth tab or focus Nth grid cell |
+| `Cmd+G` | Toggle grid view for current session group |
+| `Cmd+B` | Toggle sidebar |
+
+On first use it will ask for permission. You can enable/disable shortcuts in Settings.
+
+---
+
+## Credits
+
+Inspired by and built on top of [FleetCode](https://github.com/built-by-as/FleetCode) by [@built-by-as](https://github.com/built-by-as). Original concept: a lightweight control pane to run CLI coding agents in parallel with git worktree isolation.
+
+HenrixTab adds presets, grid view, drag-to-reorder, expand-to-focus, sidebar folders, keyboard shortcuts, and a revamped UI.
+
+---
 
 ## License
 
