@@ -184,6 +184,36 @@
     box-shadow: 0 0 6px rgba(239, 68, 68, 0.4);
   }
 
+  /* Agent status indicators */
+  .session-indicator.status-working, .status-dot.status-working {
+    background: #f59e0b !important;
+    box-shadow: 0 0 6px rgba(245, 158, 11, 0.6) !important;
+    animation: pulse-glow-amber 1.5s ease-in-out infinite;
+  }
+
+  .session-indicator.status-waiting, .status-dot.status-waiting {
+    background: #22c55e !important;
+    box-shadow: 0 0 6px rgba(34, 197, 94, 0.6) !important;
+  }
+
+  .session-indicator.status-idle, .status-dot.status-idle {
+    background: rgba(255, 255, 255, 0.15) !important;
+    box-shadow: none !important;
+  }
+
+  .status-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    display: inline-block;
+    transition: all 0.3s ease;
+  }
+
+  @keyframes pulse-glow-amber {
+    0%, 100% { box-shadow: 0 0 4px rgba(245, 158, 11, 0.3); }
+    50% { box-shadow: 0 0 10px rgba(245, 158, 11, 0.7); }
+  }
+
   .session-menu-btn {
     @apply text-gray-500 hover:text-gray-300 ml-2;
     font-size: 14px;
@@ -594,6 +624,156 @@
 
   .grid-expand-btn:hover {
     color: #8b5cf6 !important;
+  }
+
+  /* === Search Bar === */
+  .search-bar {
+    position: fixed;
+    top: 0;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 100;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    background: linear-gradient(135deg, #1e1b2e, #16132a);
+    border: 1px solid rgba(139, 92, 246, 0.3);
+    border-top: none;
+    border-radius: 0 0 12px 12px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+    animation: fadeIn 0.15s ease-out;
+  }
+
+  .search-bar.hidden {
+    display: none !important;
+  }
+
+  .search-input {
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 6px;
+    padding: 4px 10px;
+    color: white;
+    font-size: 13px;
+    width: 300px;
+    outline: none;
+  }
+
+  .search-input:focus {
+    border-color: #8b5cf6;
+    box-shadow: 0 0 0 2px rgba(139, 92, 246, 0.2);
+  }
+
+  .search-results {
+    position: fixed;
+    top: 40px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 99;
+    background: linear-gradient(135deg, #1e1b2e, #16132a);
+    border: 1px solid rgba(139, 92, 246, 0.2);
+    border-radius: 0 0 12px 12px;
+    max-height: 300px;
+    overflow-y: auto;
+    width: 500px;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+  }
+
+  .search-results.hidden {
+    display: none !important;
+  }
+
+  .search-result-item {
+    padding: 6px 12px;
+    cursor: pointer;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+    transition: background 0.15s;
+  }
+
+  .search-result-item:hover {
+    background: rgba(139, 92, 246, 0.12);
+  }
+
+  /* === Swarm Canvas === */
+  .swarm-node {
+    position: absolute;
+    width: 200px;
+    border-radius: 12px;
+    background: linear-gradient(135deg, #1e1b2e, #16132a);
+    border: 2px solid rgba(139, 92, 246, 0.3);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+    cursor: grab;
+    user-select: none;
+    z-index: 3;
+    transition: box-shadow 0.2s, border-color 0.2s;
+    animation: fadeIn 0.3s ease-out;
+  }
+
+  .swarm-node:hover {
+    border-color: rgba(139, 92, 246, 0.5);
+    box-shadow: 0 6px 24px rgba(139, 92, 246, 0.2);
+  }
+
+  .swarm-node.dragging {
+    cursor: grabbing;
+    box-shadow: 0 12px 36px rgba(139, 92, 246, 0.3);
+    z-index: 10;
+  }
+
+  .swarm-node-header {
+    padding: 8px 12px;
+    border-bottom: 1px solid rgba(139, 92, 246, 0.15);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border-radius: 10px 10px 0 0;
+    background: rgba(139, 92, 246, 0.08);
+  }
+
+  .swarm-node-body {
+    padding: 8px 12px;
+    font-size: 11px;
+    color: #999;
+    min-height: 40px;
+  }
+
+  .swarm-port {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: rgba(139, 92, 246, 0.3);
+    border: 2px solid #8b5cf6;
+    position: absolute;
+    cursor: crosshair;
+    z-index: 5;
+    transition: all 0.15s;
+  }
+
+  .swarm-port:hover {
+    transform: scale(1.4);
+    background: #8b5cf6;
+    box-shadow: 0 0 8px rgba(139, 92, 246, 0.6);
+  }
+
+  .swarm-port.output {
+    right: -6px;
+    top: 50%;
+    transform: translateY(-50%);
+  }
+
+  .swarm-port.output:hover {
+    transform: translateY(-50%) scale(1.4);
+  }
+
+  .swarm-port.input {
+    left: -6px;
+    top: 50%;
+    transform: translateY(-50%);
+  }
+
+  .swarm-port.input:hover {
+    transform: translateY(-50%) scale(1.4);
   }
 
   /* === Scrollbar === */

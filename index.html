@@ -40,6 +40,13 @@
             <div id="session-list"></div>
           </div>
 
+          <div class="sidebar-section">
+            <div class="sidebar-section-header">
+              <div class="sidebar-section-title">SWARM</div>
+              <button id="open-swarm" class="section-add-btn" title="Open Swarm Canvas" style="font-size: 9px; width: auto; padding: 0 4px;">Open</button>
+            </div>
+          </div>
+
           <div class="sidebar-section" id="mcp-section" style="display: none;">
             <div class="sidebar-section-header">
               <div class="sidebar-section-title">MCP SERVERS</div>
@@ -421,6 +428,70 @@
         <div class="btn-group">
           <button id="cancel-apply-to-project" class="btn-secondary">Cancel</button>
           <button id="confirm-apply-to-project" class="btn-primary">Apply Changes</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Search Bar (Cmd+F) -->
+    <div id="search-bar" class="search-bar hidden">
+      <input type="text" id="search-input" class="search-input" placeholder="Search across all sessions..." />
+      <span id="search-count" class="text-xs text-gray-500" style="min-width: 60px; text-align: center;"></span>
+      <button id="search-close" class="text-gray-500 hover:text-white" style="font-size: 18px; background: none; border: none; cursor: pointer;">&times;</button>
+    </div>
+
+    <!-- Search Results -->
+    <div id="search-results" class="search-results hidden"></div>
+
+    <!-- Diff Viewer Modal -->
+    <div id="diff-modal" class="modal-overlay hidden">
+      <div class="modal" style="max-width: 700px; max-height: 80vh;">
+        <h2 class="modal-title">Changes Diff</h2>
+        <pre id="diff-content" style="font-size: 12px; font-family: 'SF Mono', Menlo, monospace; overflow: auto; max-height: 60vh; padding: 12px; border-radius: 8px; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.06); white-space: pre-wrap; word-break: break-all; color: #c9d1d9; line-height: 1.5;"></pre>
+        <div class="btn-group">
+          <button id="diff-close" class="btn-secondary">Close</button>
+          <button id="diff-merge" class="btn-primary">Merge to Parent</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Swarm Canvas View -->
+    <div id="swarm-view" class="flex-1 hidden" style="display: none; position: relative;">
+      <div id="swarm-toolbar" class="flex items-center justify-between px-3 py-1" style="background: rgba(139,92,246,0.06); border-bottom: 1px solid rgba(139,92,246,0.12);">
+        <div class="flex items-center space-x-3">
+          <span class="text-sm text-gray-300 font-medium">Swarm Canvas</span>
+          <button id="swarm-add-agent" class="text-xs px-2 py-1 rounded-md transition" style="background: rgba(139,92,246,0.2); color: #a78bfa; border: 1px solid rgba(139,92,246,0.3);">+ Add Agent</button>
+        </div>
+        <div class="flex items-center space-x-2">
+          <button id="swarm-grid-view" class="text-xs text-gray-400 hover:text-white px-2 py-1 rounded-md transition" style="background: rgba(255,255,255,0.06);">Grid View</button>
+          <button id="swarm-exit" class="text-xs text-gray-400 hover:text-red-400 px-2 py-1 rounded-md transition" style="background: rgba(255,255,255,0.06);">Exit Swarm</button>
+        </div>
+      </div>
+      <svg id="swarm-connections" style="position: absolute; top: 33px; left: 0; width: 100%; height: calc(100% - 33px); pointer-events: none; z-index: 1;"></svg>
+      <div id="swarm-canvas" style="position: relative; width: 100%; height: calc(100% - 33px); overflow: auto; z-index: 2;"></div>
+    </div>
+
+    <!-- Swarm Add Agent Modal -->
+    <div id="swarm-agent-modal" class="modal-overlay hidden">
+      <div class="modal" style="max-width: 380px;">
+        <h2 class="modal-title">Add Swarm Agent</h2>
+        <div class="form-group">
+          <label class="form-label">Agent Name</label>
+          <input type="text" id="swarm-agent-name" class="form-input" placeholder="e.g., Architect, Tester, Fixer" />
+        </div>
+        <div class="form-group">
+          <label class="form-label">Project Directory</label>
+          <div class="directory-input-group">
+            <input type="text" id="swarm-agent-dir" class="form-input" readonly placeholder="Select directory..." />
+            <button id="swarm-agent-browse" class="btn-icon">Browse</button>
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Initial Prompt (optional)</label>
+          <textarea id="swarm-agent-prompt" class="form-input" rows="3" placeholder="What should this agent do?"></textarea>
+        </div>
+        <div class="btn-group">
+          <button id="swarm-agent-cancel" class="btn-secondary">Cancel</button>
+          <button id="swarm-agent-create" class="btn-primary">Create Agent</button>
         </div>
       </div>
     </div>

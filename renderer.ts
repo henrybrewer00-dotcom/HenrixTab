@@ -23,6 +23,7 @@ interface PresetGroup {
   sessionIds: string[];
   collapsed: boolean;
   slots: PresetSlot[];
+  presetId?: string; // link back to the saved preset for re-launch
 }
 
 interface McpServer {
@@ -225,6 +226,33 @@ let terminalSettings: TerminalSettings = { ...DEFAULT_SETTINGS };
 
 // Track activity timers for each session
 const activityTimers = new Map<string, NodeJS.Timeout>();
+
+// Session status tracking: "working" | "waiting" | "idle"
+type AgentStatus = "working" | "waiting" | "idle";
+const sessionStatuses = new Map<string, AgentStatus>();
+const statusIdleTimers = new Map<string, NodeJS.Timeout>();
+
+function setSessionStatus(sessionId: string, status: AgentStatus) {
+  const prev = sessionStatuses.get(sessionId);
+  if (prev === status) return;
+  sessionStatuses.set(sessionId, status);
+
+  // Update sidebar indicator
+  const sidebarItem = document.getElementById(`sidebar-${sessionId}`);
+  const indicator = sidebarItem?.querySelector(".session-indicator");
+  if (indicator) {
+    indicator.classList.remove("status-working", "status-waiting", "status-idle");
+    indicator.classList.add(`status-${status}`);
+    indicator.setAttribute("title", status.charAt(0).toUpperCase() + status.slice(1));
+  }
+
+  // Update grid cell header if in grid view
+  const cellHeader = document.querySelector(`#grid-cell-${sessionId} .grid-cell-status`);
+  if (cellHeader) {
+    cellHeader.className = `grid-cell-status status-dot status-${status}`;
+    cellHeader.setAttribute("title", status.charAt(0).toUpperCase() + status.slice(1));
+  }
+}
 
 // Grid view state
 let gridViewActive = false;
@@ -466,6 +494,18 @@ function renderSidebarFolder(group: PresetGroup) {
     if (!confirm(`Delete all sessions in "${group.name}"?`)) return;
     deleteGroup(group.id);
   });
+
+  // Right-click to re-launch
+  folder.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!group.presetId) return;
+    const preset = loadedPresets.find(p => p.id === group.presetId);
+    if (!preset) return;
+    if (confirm(`Re-launch "${preset.name}" as a new group?`)) {
+      launchPreset(preset);
+    }
+  });
 }
 
 function addToSidebarInFolder(sessionId: string, name: string, hasActivePty: boolean, groupId: string) {
@@ -654,6 +694,7 @@ function addToSidebar(sessionId: string, name: string, hasActivePty: boolean, co
       <button class="session-menu-btn" data-id="${sessionId}" title="Session options">⋯</button>
       <div class="session-menu hidden" data-id="${sessionId}">
         <button class="session-menu-item rename-session-btn" data-id="${sessionId}">Rename</button>
+        ${isWorktree ? `<button class="session-menu-item diff-session-btn" data-id="${sessionId}">View Diff</button>` : ''}
         ${applyMenuItem}
         <button class="session-menu-item delete-session-btn" data-id="${sessionId}">Delete</button>
       </div>
@@ -723,6 +764,14 @@ function addToSidebar(sessionId: string, name: string, hasActivePty: boolean, co
     e.stopPropagation();
     menu?.classList.add("hidden");
     showApplyToProjectDialog(sessionId);
+  });
+
+  // Diff button (only for worktree sessions)
+  const diffBtn = item.querySelector(".diff-session-btn");
+  diffBtn?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    menu?.classList.add("hidden");
+    showDiffForSession(sessionId);
   });
 
   list.appendChild(item);
@@ -1047,19 +1096,30 @@ ipcRenderer.on("session-output", (_event, sessionId: string, data: string) => {
   const session = sessions.get(sessionId);
   if (session && session.terminal) {
     // Filter out [3J (clear scrollback) to prevent viewport resets during interactive menus
-    // Keep [2J (clear screen) which is needed for the menu redraw
     const filteredData = data.replace(/\x1b\[3J/g, '');
 
     session.terminal.write(filteredData);
 
+    // Status detection: output flowing = working, prompt detected = waiting
+    if (isClaudeSessionReady(filteredData)) {
+      setSessionStatus(sessionId, "waiting");
+    } else {
+      setSessionStatus(sessionId, "working");
+      // Set idle after 3s of no output
+      const existingIdle = statusIdleTimers.get(sessionId);
+      if (existingIdle) clearTimeout(existingIdle);
+      statusIdleTimers.set(sessionId, setTimeout(() => {
+        if (sessionStatuses.get(sessionId) === "working") {
+          setSessionStatus(sessionId, "idle");
+        }
+      }, 3000));
+    }
+
     // Only mark as unread/activity if this is not the active session
     if (activeSessionId !== sessionId && session.hasActivePty) {
-      // Show activity spinner while output is coming in
       markSessionActivity(sessionId);
 
-      // Check if Claude session is ready for input
       if (isClaudeSessionReady(filteredData)) {
-        // Clear activity timer and set unread
         const existingTimer = activityTimers.get(sessionId);
         if (existingTimer) {
           clearTimeout(existingTimer);
@@ -1466,6 +1526,7 @@ function createGridCell(sessionId: string, slot: PresetSlot, index: number): HTM
       ${label} #${index + 1}
     </span>
     <div class="flex items-center" style="gap: 6px;">
+      <span class="grid-cell-status status-dot status-idle" title="Idle"></span>
       <button class="grid-expand-btn" title="Expand (double-click)" style="font-size: 10px; color: #666; cursor: pointer; background: none; border: none; padding: 0;">&#9634;</button>
     </div>
   `;
@@ -1682,6 +1743,7 @@ async function launchPreset(preset: SessionPreset) {
     sessionIds: [],
     collapsed: false,
     slots: [...preset.slots],
+    presetId: preset.id,
   };
   presetGroups.set(groupId, group);
   activeGridGroupId = groupId;
@@ -2749,3 +2811,590 @@ ipcRenderer.on("shortcut-toggle-grid", () => {
     }
   }
 });
+
+// ============================================================
+// SEARCH (Cmd+F)
+// ============================================================
+const searchBar = document.getElementById("search-bar")!;
+const searchInput = document.getElementById("search-input") as HTMLInputElement;
+const searchCount = document.getElementById("search-count")!;
+const searchResults = document.getElementById("search-results")!;
+
+function openSearch() {
+  searchBar.classList.remove("hidden");
+  searchInput.focus();
+  searchInput.select();
+}
+
+function closeSearch() {
+  searchBar.classList.add("hidden");
+  searchResults.classList.add("hidden");
+  searchInput.value = "";
+  searchCount.textContent = "";
+}
+
+function doSearch(query: string) {
+  searchResults.innerHTML = "";
+  if (!query || query.length < 2) {
+    searchResults.classList.add("hidden");
+    searchCount.textContent = "";
+    return;
+  }
+
+  const lowerQuery = query.toLowerCase();
+  let totalMatches = 0;
+
+  sessions.forEach((session) => {
+    if (!session.terminal) return;
+
+    const buffer = session.terminal.buffer.active;
+    const lines: string[] = [];
+    for (let i = 0; i < buffer.length; i++) {
+      const line = buffer.getLine(i)?.translateToString(true) || "";
+      if (line.toLowerCase().includes(lowerQuery)) {
+        lines.push(line.trim());
+      }
+    }
+
+    if (lines.length > 0) {
+      totalMatches += lines.length;
+      // Show up to 3 matches per session
+      const shown = lines.slice(-3);
+      shown.forEach(line => {
+        const item = document.createElement("div");
+        item.className = "search-result-item";
+        const highlighted = line.replace(
+          new RegExp(`(${query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, "gi"),
+          '<span style="background: rgba(139,92,246,0.4); color: white; padding: 0 2px; border-radius: 2px;">$1</span>'
+        );
+        item.innerHTML = `
+          <div class="text-xs text-gray-500 mb-1">${session.name}</div>
+          <div class="text-xs text-gray-300" style="font-family: monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${highlighted}</div>
+        `;
+        item.addEventListener("click", () => {
+          // Switch to that session
+          if (!gridViewActive) {
+            if (session.hasActivePty) switchToSession(session.id);
+          } else {
+            focusGridCell(session.id);
+          }
+          closeSearch();
+        });
+        searchResults.appendChild(item);
+      });
+    }
+  });
+
+  searchCount.textContent = `${totalMatches} match${totalMatches !== 1 ? "es" : ""}`;
+  if (totalMatches > 0) {
+    searchResults.classList.remove("hidden");
+  } else {
+    searchResults.classList.add("hidden");
+  }
+}
+
+ipcRenderer.on("shortcut-search", () => {
+  if (searchBar.classList.contains("hidden")) {
+    openSearch();
+  } else {
+    closeSearch();
+  }
+});
+
+searchInput?.addEventListener("input", () => {
+  doSearch(searchInput.value);
+});
+
+searchInput?.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closeSearch();
+});
+
+document.getElementById("search-close")?.addEventListener("click", closeSearch);
+
+// ============================================================
+// DIFF VIEWER + AUTO-MERGE
+// ============================================================
+let diffSessionId: string | null = null;
+
+async function showDiffForSession(sessionId: string) {
+  diffSessionId = sessionId;
+  const result = await ipcRenderer.invoke("get-session-diff", sessionId);
+  const content = document.getElementById("diff-content")!;
+  const mergeBtn = document.getElementById("diff-merge") as HTMLButtonElement;
+
+  if (result.success) {
+    // Color the diff output
+    const lines = result.diff.split("\n");
+    const colored = lines.map((line: string) => {
+      const escaped = line.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      if (line.startsWith("+") && !line.startsWith("+++")) return `<span style="color: #3fb950;">${escaped}</span>`;
+      if (line.startsWith("-") && !line.startsWith("---")) return `<span style="color: #ff7b72;">${escaped}</span>`;
+      if (line.startsWith("@@")) return `<span style="color: #79c0ff;">${escaped}</span>`;
+      if (line.startsWith("diff ") || line.startsWith("index ")) return `<span style="color: #8b949e; font-weight: bold;">${escaped}</span>`;
+      return escaped;
+    }).join("\n");
+    content.innerHTML = colored;
+    mergeBtn.style.display = "";
+  } else {
+    content.textContent = result.error;
+    mergeBtn.style.display = "none";
+  }
+
+  document.getElementById("diff-modal")?.classList.remove("hidden");
+}
+
+document.getElementById("diff-close")?.addEventListener("click", () => {
+  document.getElementById("diff-modal")?.classList.add("hidden");
+});
+
+document.getElementById("diff-merge")?.addEventListener("click", async () => {
+  if (!diffSessionId) return;
+  if (!confirm("Merge this branch into the parent branch?")) return;
+
+  const btn = document.getElementById("diff-merge") as HTMLButtonElement;
+  btn.textContent = "Merging...";
+  btn.disabled = true;
+
+  const result = await ipcRenderer.invoke("merge-session-to-parent", diffSessionId);
+  if (result.success) {
+    alert("Merged successfully!");
+    document.getElementById("diff-modal")?.classList.add("hidden");
+  } else {
+    alert(`Merge failed: ${result.error}`);
+  }
+  btn.textContent = "Merge to Parent";
+  btn.disabled = false;
+});
+
+// ============================================================
+// SWARM CANVAS MODE
+// ============================================================
+interface SwarmAgent {
+  id: string;
+  name: string;
+  sessionId: string | null;
+  x: number;
+  y: number;
+  projectDir: string;
+  initialPrompt?: string;
+  connections: string[]; // IDs of agents this one outputs to
+}
+
+const swarmAgents = new Map<string, SwarmAgent>();
+let swarmActive = false;
+let connectingFrom: string | null = null; // agent ID we're drawing a connection from
+let swarmAgentDir = "";
+
+function enterSwarmView() {
+  swarmActive = true;
+  document.getElementById("tabs")!.style.display = "none";
+  document.getElementById("session-container")!.style.display = "none";
+  const gridView = document.getElementById("grid-view")!;
+  gridView.style.display = "none";
+  gridView.classList.add("hidden");
+
+  const swarmView = document.getElementById("swarm-view")!;
+  swarmView.style.display = "flex";
+  swarmView.style.flexDirection = "column";
+  swarmView.style.flex = "1";
+}
+
+function exitSwarmView() {
+  swarmActive = false;
+  document.getElementById("swarm-view")!.style.display = "none";
+  document.getElementById("tabs")!.style.display = "";
+  document.getElementById("session-container")!.style.display = "";
+}
+
+function createSwarmNode(agent: SwarmAgent) {
+  const canvas = document.getElementById("swarm-canvas")!;
+  const node = document.createElement("div");
+  node.className = "swarm-node";
+  node.id = `swarm-node-${agent.id}`;
+  node.style.left = `${agent.x}px`;
+  node.style.top = `${agent.y}px`;
+
+  const status = agent.sessionId ? sessionStatuses.get(agent.sessionId) || "idle" : "idle";
+
+  node.innerHTML = `
+    <div class="swarm-node-header">
+      <div class="flex items-center space-x-2">
+        <span class="status-dot status-${status}"></span>
+        <span class="text-sm font-semibold text-white">${agent.name}</span>
+      </div>
+      <button class="swarm-node-delete text-gray-500 hover:text-red-400" style="background:none;border:none;cursor:pointer;font-size:14px;">&times;</button>
+    </div>
+    <div class="swarm-node-body">
+      <div class="text-xs text-gray-500 truncate">${agent.projectDir ? path.basename(agent.projectDir) : "No directory"}</div>
+      ${agent.initialPrompt ? `<div class="text-xs text-gray-600 mt-1 truncate">"${agent.initialPrompt.slice(0, 40)}${agent.initialPrompt.length > 40 ? "..." : ""}"</div>` : ""}
+      ${agent.sessionId ? '<div class="text-xs mt-1" style="color: #8b5cf6;">Running</div>' : '<div class="text-xs text-gray-600 mt-1">Not started</div>'}
+    </div>
+    <div class="swarm-port output" title="Drag to connect output"></div>
+    <div class="swarm-port input" title="Drop connection here"></div>
+  `;
+
+  // Dragging the node
+  let isDragging = false;
+  let dragOffsetX = 0;
+  let dragOffsetY = 0;
+
+  node.querySelector(".swarm-node-header")?.addEventListener("mousedown", (e: Event) => {
+    const me = e as MouseEvent;
+    if ((me.target as HTMLElement).classList.contains("swarm-node-delete")) return;
+    isDragging = true;
+    node.classList.add("dragging");
+    dragOffsetX = me.clientX - node.offsetLeft;
+    dragOffsetY = me.clientY - node.offsetTop;
+    e.preventDefault();
+  });
+
+  document.addEventListener("mousemove", (e: MouseEvent) => {
+    if (!isDragging) return;
+    const canvasRect = canvas.getBoundingClientRect();
+    agent.x = Math.max(0, e.clientX - canvasRect.left - dragOffsetX + canvas.scrollLeft);
+    agent.y = Math.max(0, e.clientY - canvasRect.top - dragOffsetY + canvas.scrollTop);
+    node.style.left = `${agent.x}px`;
+    node.style.top = `${agent.y}px`;
+    renderSwarmConnections();
+  });
+
+  document.addEventListener("mouseup", () => {
+    if (isDragging) {
+      isDragging = false;
+      node.classList.remove("dragging");
+    }
+  });
+
+  // Delete button
+  node.querySelector(".swarm-node-delete")?.addEventListener("click", () => {
+    if (agent.sessionId) {
+      closeSession(agent.sessionId);
+    }
+    // Remove connections to/from this agent
+    swarmAgents.forEach(a => {
+      a.connections = a.connections.filter(c => c !== agent.id);
+    });
+    swarmAgents.delete(agent.id);
+    node.remove();
+    renderSwarmConnections();
+  });
+
+  // Output port — start drawing connection
+  const outputPort = node.querySelector(".swarm-port.output") as HTMLElement;
+  outputPort?.addEventListener("mousedown", (e) => {
+    e.stopPropagation();
+    connectingFrom = agent.id;
+    document.body.style.cursor = "crosshair";
+  });
+
+  // Input port — complete connection
+  const inputPort = node.querySelector(".swarm-port.input") as HTMLElement;
+  inputPort?.addEventListener("mouseup", (e) => {
+    e.stopPropagation();
+    if (connectingFrom && connectingFrom !== agent.id) {
+      const sourceAgent = swarmAgents.get(connectingFrom);
+      if (sourceAgent && !sourceAgent.connections.includes(agent.id)) {
+        sourceAgent.connections.push(agent.id);
+        renderSwarmConnections();
+      }
+    }
+    connectingFrom = null;
+    document.body.style.cursor = "";
+  });
+
+  // Double-click to open terminal in tab view
+  node.addEventListener("dblclick", () => {
+    if (agent.sessionId) {
+      exitSwarmView();
+      switchToSession(agent.sessionId);
+    }
+  });
+
+  canvas.appendChild(node);
+}
+
+function renderSwarmConnections() {
+  const svg = document.getElementById("swarm-connections")!;
+  svg.innerHTML = "";
+
+  swarmAgents.forEach(agent => {
+    agent.connections.forEach(targetId => {
+      const sourceNode = document.getElementById(`swarm-node-${agent.id}`);
+      const targetNode = document.getElementById(`swarm-node-${targetId}`);
+      if (!sourceNode || !targetNode) return;
+
+      const sx = sourceNode.offsetLeft + sourceNode.offsetWidth;
+      const sy = sourceNode.offsetTop + sourceNode.offsetHeight / 2;
+      const tx = targetNode.offsetLeft;
+      const ty = targetNode.offsetTop + targetNode.offsetHeight / 2;
+
+      // Curved bezier line
+      const midX = (sx + tx) / 2;
+      const line = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      line.setAttribute("d", `M ${sx} ${sy} C ${midX} ${sy}, ${midX} ${ty}, ${tx} ${ty}`);
+      line.setAttribute("stroke", "#8b5cf6");
+      line.setAttribute("stroke-width", "2");
+      line.setAttribute("fill", "none");
+      line.setAttribute("stroke-dasharray", "6,3");
+      line.style.pointerEvents = "stroke";
+      line.style.cursor = "pointer";
+
+      // Click to remove connection
+      line.addEventListener("click", () => {
+        agent.connections = agent.connections.filter(c => c !== targetId);
+        renderSwarmConnections();
+      });
+
+      // Arrow head
+      const arrowSize = 8;
+      const angle = Math.atan2(ty - sy, tx - midX);
+      const arrow = document.createElementNS("http://www.w3.org/2000/svg", "polygon");
+      const ax = tx;
+      const ay = ty;
+      arrow.setAttribute("points", `${ax},${ay} ${ax - arrowSize * Math.cos(angle - 0.4)},${ay - arrowSize * Math.sin(angle - 0.4)} ${ax - arrowSize * Math.cos(angle + 0.4)},${ay - arrowSize * Math.sin(angle + 0.4)}`);
+      arrow.setAttribute("fill", "#8b5cf6");
+
+      svg.appendChild(line);
+      svg.appendChild(arrow);
+    });
+  });
+}
+
+// Cancel connection on mouseup anywhere
+document.addEventListener("mouseup", () => {
+  if (connectingFrom) {
+    connectingFrom = null;
+    document.body.style.cursor = "";
+  }
+});
+
+// Open swarm
+document.getElementById("open-swarm")?.addEventListener("click", () => {
+  enterSwarmView();
+});
+
+// Exit swarm
+document.getElementById("swarm-exit")?.addEventListener("click", () => {
+  exitSwarmView();
+});
+
+// Add agent button
+document.getElementById("swarm-add-agent")?.addEventListener("click", () => {
+  swarmAgentDir = "";
+  (document.getElementById("swarm-agent-name") as HTMLInputElement).value = "";
+  (document.getElementById("swarm-agent-dir") as HTMLInputElement).value = "";
+  (document.getElementById("swarm-agent-prompt") as HTMLTextAreaElement).value = "";
+  document.getElementById("swarm-agent-modal")?.classList.remove("hidden");
+});
+
+document.getElementById("swarm-agent-browse")?.addEventListener("click", async () => {
+  const dir = await ipcRenderer.invoke("select-directory");
+  if (dir) {
+    swarmAgentDir = dir;
+    (document.getElementById("swarm-agent-dir") as HTMLInputElement).value = `(${path.basename(dir)}) ${dir}`;
+  }
+});
+
+document.getElementById("swarm-agent-cancel")?.addEventListener("click", () => {
+  document.getElementById("swarm-agent-modal")?.classList.add("hidden");
+});
+
+document.getElementById("swarm-agent-create")?.addEventListener("click", async () => {
+  const name = (document.getElementById("swarm-agent-name") as HTMLInputElement).value.trim();
+  if (!name) { alert("Enter a name"); return; }
+  if (!swarmAgentDir) { alert("Select a directory"); return; }
+
+  const prompt = (document.getElementById("swarm-agent-prompt") as HTMLTextAreaElement).value.trim();
+  document.getElementById("swarm-agent-modal")?.classList.add("hidden");
+
+  const agentId = `swarm-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+
+  // Place node at a staggered position
+  const count = swarmAgents.size;
+  const agent: SwarmAgent = {
+    id: agentId,
+    name,
+    sessionId: null,
+    x: 80 + (count % 3) * 240,
+    y: 80 + Math.floor(count / 3) * 180,
+    projectDir: swarmAgentDir,
+    initialPrompt: prompt || undefined,
+    connections: [],
+  };
+
+  swarmAgents.set(agentId, agent);
+  createSwarmNode(agent);
+
+  // Create a Claude Code session for this agent
+  const config: SessionConfig = {
+    projectDir: swarmAgentDir,
+    sessionType: SessionType.LOCAL,
+    codingAgent: "claude",
+    skipPermissions: true,
+  };
+
+  // Wait for session creation
+  const sessionId = await new Promise<string>((resolve) => {
+    const prevLaunching = gridLaunching;
+    gridLaunching = true;
+    const handler = (_event: any, sid: string, persistedSession: any) => {
+      ipcRenderer.removeListener("session-created", handler);
+      gridLaunching = prevLaunching;
+      addSession(persistedSession, true);
+      updateSessionState(sid, true);
+      resolve(sid);
+    };
+    ipcRenderer.on("session-created", handler);
+    ipcRenderer.send("create-session", config);
+  });
+
+  agent.sessionId = sessionId;
+
+  // Update the node UI
+  const nodeEl = document.getElementById(`swarm-node-${agentId}`);
+  if (nodeEl) {
+    const bodyEl = nodeEl.querySelector(".swarm-node-body");
+    if (bodyEl) {
+      const dirName = path.basename(agent.projectDir);
+      bodyEl.innerHTML = `
+        <div class="text-xs text-gray-500 truncate">${dirName}</div>
+        ${agent.initialPrompt ? `<div class="text-xs text-gray-600 mt-1 truncate">"${agent.initialPrompt.slice(0, 40)}..."</div>` : ""}
+        <div class="text-xs mt-1" style="color: #8b5cf6;">Running</div>
+      `;
+    }
+  }
+
+  // If there's an initial prompt, send it after a delay
+  if (prompt) {
+    setTimeout(() => {
+      ipcRenderer.send("session-input", sessionId, prompt + "\r");
+    }, 3000); // Wait for Claude to boot
+  }
+});
+
+// Swarm grid view — show all swarm agent terminals in a grid
+document.getElementById("swarm-grid-view")?.addEventListener("click", () => {
+  const agentSessionIds = Array.from(swarmAgents.values())
+    .filter(a => a.sessionId)
+    .map(a => a.sessionId!);
+
+  if (agentSessionIds.length === 0) { alert("No running agents"); return; }
+
+  // Create a temporary group for the grid view
+  const groupId = `swarm-grid-${Date.now()}`;
+  activeGridGroupId = groupId;
+  gridViewActive = true;
+  gridSessionIds = agentSessionIds;
+
+  // Hide swarm, show grid
+  document.getElementById("swarm-view")!.style.display = "none";
+  document.getElementById("tabs")!.style.display = "none";
+  document.getElementById("session-container")!.style.display = "none";
+  const gridView = document.getElementById("grid-view")!;
+  gridView.style.display = "flex";
+  gridView.style.flexDirection = "column";
+  gridView.style.flex = "1";
+  gridView.classList.remove("hidden");
+
+  document.getElementById("grid-title")!.textContent = `Swarm — ${agentSessionIds.length} agents`;
+
+  const cols = Math.ceil(Math.sqrt(agentSessionIds.length));
+  const rows = Math.ceil(agentSessionIds.length / cols);
+  const gridCells = document.getElementById("grid-cells")!;
+  gridCells.innerHTML = "";
+  gridCells.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+  gridCells.style.gridTemplateRows = `repeat(${rows}, 1fr)`;
+
+  // Create grid cells
+  agentSessionIds.forEach((sid, index) => {
+    const session = sessions.get(sid);
+    if (!session) return;
+
+    // Find the swarm agent name
+    const agent = Array.from(swarmAgents.values()).find(a => a.sessionId === sid);
+    const agentType = session.config.codingAgent as PresetSlot["agent"];
+    const slot: PresetSlot = { agent: agentType };
+
+    const cell = createGridCell(sid, slot, index);
+    // Override label with swarm agent name
+    const label = cell.querySelector(".grid-cell-label");
+    if (label && agent) {
+      label.textContent = agent.name;
+    }
+    gridCells.appendChild(cell);
+  });
+
+  // Create terminals after layout
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      agentSessionIds.forEach(sid => {
+        const session = sessions.get(sid);
+        if (!session) return;
+        // Remove existing terminal
+        if (session.element) session.element.remove();
+        if (session.terminal) session.terminal.dispose();
+        session.terminal = null;
+        session.fitAddon = null;
+        session.element = null;
+        document.getElementById(`tab-${sid}`)?.remove();
+
+        const cell = document.getElementById(`grid-cell-${sid}`);
+        if (!cell) return;
+        const ui = createTerminalUI(sid, cell);
+        session.terminal = ui.terminal;
+        session.fitAddon = ui.fitAddon;
+        session.element = ui.element;
+      });
+
+      setTimeout(() => {
+        fitAllGridTerminals();
+        if (gridSessionIds.length > 0) focusGridCell(gridSessionIds[0]);
+      }, 100);
+    });
+  });
+});
+
+// Inter-agent communication: when a connected agent's output shows "waiting",
+// forward a summary to connected agents
+// This monitors session output and routes it through connections
+const agentOutputBuffers = new Map<string, string>();
+
+function setupSwarmRouting() {
+  // Check every 2 seconds for agents that just finished (went to "waiting")
+  setInterval(() => {
+    swarmAgents.forEach(agent => {
+      if (!agent.sessionId) return;
+      const status = sessionStatuses.get(agent.sessionId);
+      const prevStatus = agentOutputBuffers.get(`prev-${agent.id}`);
+
+      if (status === "waiting" && prevStatus === "working" && agent.connections.length > 0) {
+        // Agent just finished — get last lines of output and send to connected agents
+        const session = sessions.get(agent.sessionId);
+        if (!session?.terminal) return;
+
+        const buffer = session.terminal.buffer.active;
+        const lines: string[] = [];
+        const start = Math.max(0, buffer.cursorY - 10);
+        for (let i = start; i <= buffer.cursorY; i++) {
+          const line = buffer.getLine(i)?.translateToString(true) || "";
+          if (line.trim()) lines.push(line.trim());
+        }
+
+        if (lines.length > 0) {
+          const summary = lines.slice(-5).join("\\n");
+          agent.connections.forEach(targetId => {
+            const target = swarmAgents.get(targetId);
+            if (target?.sessionId) {
+              const msg = `[From ${agent.name}]: ${summary}`;
+              ipcRenderer.send("session-input", target.sessionId, msg + "\r");
+            }
+          });
+        }
+      }
+
+      agentOutputBuffers.set(`prev-${agent.id}`, status || "idle");
+    });
+  }, 2000);
+}
+
+setupSwarmRouting();

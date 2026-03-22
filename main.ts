@@ -950,6 +950,41 @@ ipcMain.handle("delete-preset", (_event, presetId: string) => {
   return presets;
 });
 
+// Get git diff for a worktree session
+ipcMain.handle("get-session-diff", async (_event, sessionId: string) => {
+  const sessions = getPersistedSessions();
+  const session = sessions.find(s => s.id === sessionId);
+  if (!session || !session.worktreePath || !session.config.parentBranch) {
+    return { success: false, error: "Not a worktree session" };
+  }
+  try {
+    const { stdout } = await execAsync(`git diff ${session.config.parentBranch}`, { cwd: session.worktreePath, maxBuffer: 1024 * 1024 * 5 });
+    return { success: true, diff: stdout || "(no changes)" };
+  } catch (e: any) {
+    return { success: false, error: e.message };
+  }
+});
+
+// Merge worktree branch to parent
+ipcMain.handle("merge-session-to-parent", async (_event, sessionId: string) => {
+  const sessions = getPersistedSessions();
+  const session = sessions.find(s => s.id === sessionId);
+  if (!session || !session.worktreePath || !session.config.parentBranch || !session.gitBranch) {
+    return { success: false, error: "Not a worktree session" };
+  }
+  try {
+    // Commit any uncommitted changes in worktree first
+    await execAsync(`git add -A && git diff --cached --quiet || git commit -m "HenrixTab auto-commit before merge"`, { cwd: session.worktreePath }).catch(() => {});
+    // Merge from the project directory
+    const git = simpleGit(session.config.projectDir);
+    await git.raw(["checkout", session.config.parentBranch]);
+    await git.raw(["merge", session.gitBranch, "--no-edit"]);
+    return { success: true };
+  } catch (e: any) {
+    return { success: false, error: e.message };
+  }
+});
+
 // Clear all sessions and data
 ipcMain.handle("clear-all-sessions", async () => {
   // Kill all active PTY processes
@@ -1025,6 +1060,9 @@ const createWindow = () => {
       } else if (input.key === "b") {
         event.preventDefault();
         mainWindow.webContents.send("shortcut-toggle-sidebar");
+      } else if (input.key === "f") {
+        event.preventDefault();
+        mainWindow.webContents.send("shortcut-search");
       }
     }
   });
