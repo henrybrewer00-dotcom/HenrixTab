@@ -2969,21 +2969,25 @@ document.getElementById("diff-merge")?.addEventListener("click", async () => {
 // ============================================================
 // SWARM CANVAS MODE
 // ============================================================
-interface SwarmAgent {
+interface SwarmNode {
   id: string;
+  type: "agent" | "prompt" | "output";
   name: string;
   sessionId: string | null;
   x: number;
   y: number;
   projectDir: string;
   initialPrompt?: string;
-  connections: string[]; // IDs of agents this one outputs to
+  promptText?: string; // for prompt nodes
+  outputLog?: string[]; // for output nodes — collected summaries
+  connections: string[]; // IDs of nodes this one outputs to
 }
 
-const swarmAgents = new Map<string, SwarmAgent>();
+const swarmAgents = new Map<string, SwarmNode>();
 let swarmActive = false;
-let connectingFrom: string | null = null; // agent ID we're drawing a connection from
+let connectingFrom: string | null = null;
 let swarmAgentDir = "";
+let henryCreated = false;
 
 function enterSwarmView() {
   swarmActive = true;
@@ -2996,7 +3000,63 @@ function enterSwarmView() {
   const swarmView = document.getElementById("swarm-view")!;
   swarmView.style.display = "flex";
 
-  // Show/hide empty state
+  // First time: auto-create Henry, a Prompt, and an Output node
+  if (!henryCreated && swarmAgents.size === 0) {
+    henryCreated = true;
+
+    // Prompt node on the left
+    const promptNode: SwarmNode = {
+      id: `prompt-${Date.now()}`,
+      type: "prompt",
+      name: "Prompt",
+      sessionId: null,
+      x: 40,
+      y: 120,
+      projectDir: "",
+      promptText: "",
+      connections: [],
+    };
+
+    // Henry agent in the middle (no session yet — needs a dir)
+    const henryNode: SwarmNode = {
+      id: `henry-${Date.now()}`,
+      type: "agent",
+      name: "Henry",
+      sessionId: null,
+      x: 320,
+      y: 100,
+      projectDir: "",
+      initialPrompt: "You are Henry, a coordinator agent. Help orchestrate tasks between other agents.",
+      connections: [],
+    };
+
+    // Output node on the right
+    const outputNode: SwarmNode = {
+      id: `output-${Date.now()}`,
+      type: "output",
+      name: "Output",
+      sessionId: null,
+      x: 620,
+      y: 120,
+      projectDir: "",
+      outputLog: [],
+      connections: [],
+    };
+
+    // Wire them: prompt -> henry -> output
+    promptNode.connections.push(henryNode.id);
+    henryNode.connections.push(outputNode.id);
+
+    swarmAgents.set(promptNode.id, promptNode);
+    swarmAgents.set(henryNode.id, henryNode);
+    swarmAgents.set(outputNode.id, outputNode);
+
+    createSwarmNode(promptNode);
+    createSwarmNode(henryNode);
+    createSwarmNode(outputNode);
+    renderSwarmConnections();
+  }
+
   updateSwarmEmptyState();
 }
 
@@ -3014,8 +3074,80 @@ function exitSwarmView() {
   document.getElementById("session-container")!.style.display = "";
 }
 
-function createSwarmNode(agent: SwarmAgent) {
+// Make any element draggable on the swarm canvas
+function makeSwarmDraggable(node: HTMLElement, swarmNode: SwarmNode, dragHandle: HTMLElement) {
   const canvas = document.getElementById("swarm-canvas")!;
+  let isDragging = false;
+  let startMouseX = 0;
+  let startMouseY = 0;
+  let startNodeX = 0;
+  let startNodeY = 0;
+
+  dragHandle.addEventListener("mousedown", (e: MouseEvent) => {
+    // Don't drag if clicking buttons
+    if ((e.target as HTMLElement).closest("button")) return;
+    isDragging = true;
+    node.classList.add("dragging");
+    startMouseX = e.clientX;
+    startMouseY = e.clientY;
+    startNodeX = swarmNode.x;
+    startNodeY = swarmNode.y;
+    e.preventDefault();
+  });
+
+  const onMove = (e: MouseEvent) => {
+    if (!isDragging) return;
+    const dx = e.clientX - startMouseX;
+    const dy = e.clientY - startMouseY;
+    swarmNode.x = Math.max(0, startNodeX + dx);
+    swarmNode.y = Math.max(0, startNodeY + dy);
+    node.style.left = `${swarmNode.x}px`;
+    node.style.top = `${swarmNode.y}px`;
+    renderSwarmConnections();
+  };
+
+  const onUp = () => {
+    if (isDragging) {
+      isDragging = false;
+      node.classList.remove("dragging");
+    }
+  };
+
+  document.addEventListener("mousemove", onMove);
+  document.addEventListener("mouseup", onUp);
+}
+
+// Add ports (connection points) and their event handlers
+function addSwarmPorts(node: HTMLElement, swarmNode: SwarmNode) {
+  const outputPort = node.querySelector(".swarm-port.output") as HTMLElement;
+  const inputPort = node.querySelector(".swarm-port.input") as HTMLElement;
+
+  outputPort?.addEventListener("mousedown", (e) => {
+    e.stopPropagation();
+    connectingFrom = swarmNode.id;
+    document.body.style.cursor = "crosshair";
+  });
+
+  inputPort?.addEventListener("mouseup", (e) => {
+    e.stopPropagation();
+    if (connectingFrom && connectingFrom !== swarmNode.id) {
+      const source = swarmAgents.get(connectingFrom);
+      if (source && !source.connections.includes(swarmNode.id)) {
+        source.connections.push(swarmNode.id);
+        renderSwarmConnections();
+      }
+    }
+    connectingFrom = null;
+    document.body.style.cursor = "";
+  });
+}
+
+function createSwarmNode(agent: SwarmNode) {
+  const canvas = document.getElementById("swarm-canvas")!;
+
+  if (agent.type === "prompt") return createPromptNode(agent);
+  if (agent.type === "output") return createOutputNode(agent);
+
   const node = document.createElement("div");
   node.className = "swarm-node";
   node.id = `swarm-node-${agent.id}`;
@@ -3034,84 +3166,27 @@ function createSwarmNode(agent: SwarmAgent) {
     </div>
     <div class="swarm-node-body">
       <div class="text-xs text-gray-500 truncate">${agent.projectDir ? path.basename(agent.projectDir) : "No directory"}</div>
-      ${agent.initialPrompt ? `<div class="text-xs text-gray-600 mt-1 truncate">"${agent.initialPrompt.slice(0, 40)}${agent.initialPrompt.length > 40 ? "..." : ""}"</div>` : ""}
+      ${agent.initialPrompt ? `<div class="text-xs text-gray-600 mt-1 truncate" style="font-style:italic;">"${agent.initialPrompt.slice(0, 50)}${agent.initialPrompt.length > 50 ? "..." : ""}"</div>` : ""}
       ${agent.sessionId ? '<div class="text-xs mt-1" style="color: #8b5cf6;">Running</div>' : '<div class="text-xs text-gray-600 mt-1">Not started</div>'}
     </div>
-    <div class="swarm-port output" title="Drag to connect output"></div>
-    <div class="swarm-port input" title="Drop connection here"></div>
+    <div class="swarm-port output" title="Connect output to another node"></div>
+    <div class="swarm-port input" title="Receive input from another node"></div>
   `;
 
-  // Dragging the node
-  let isDragging = false;
-  let dragOffsetX = 0;
-  let dragOffsetY = 0;
+  const header = node.querySelector(".swarm-node-header") as HTMLElement;
+  makeSwarmDraggable(node, agent, header);
+  addSwarmPorts(node, agent);
 
-  node.querySelector(".swarm-node-header")?.addEventListener("mousedown", (e: Event) => {
-    const me = e as MouseEvent;
-    if ((me.target as HTMLElement).classList.contains("swarm-node-delete")) return;
-    isDragging = true;
-    node.classList.add("dragging");
-    dragOffsetX = me.clientX - node.offsetLeft;
-    dragOffsetY = me.clientY - node.offsetTop;
-    e.preventDefault();
-  });
-
-  document.addEventListener("mousemove", (e: MouseEvent) => {
-    if (!isDragging) return;
-    const canvasRect = canvas.getBoundingClientRect();
-    agent.x = Math.max(0, e.clientX - canvasRect.left - dragOffsetX + canvas.scrollLeft);
-    agent.y = Math.max(0, e.clientY - canvasRect.top - dragOffsetY + canvas.scrollTop);
-    node.style.left = `${agent.x}px`;
-    node.style.top = `${agent.y}px`;
-    renderSwarmConnections();
-  });
-
-  document.addEventListener("mouseup", () => {
-    if (isDragging) {
-      isDragging = false;
-      node.classList.remove("dragging");
-    }
-  });
-
-  // Delete button
   node.querySelector(".swarm-node-delete")?.addEventListener("click", () => {
-    if (agent.sessionId) {
-      closeSession(agent.sessionId);
-    }
-    // Remove connections to/from this agent
-    swarmAgents.forEach(a => {
-      a.connections = a.connections.filter(c => c !== agent.id);
-    });
+    if (agent.sessionId) closeSession(agent.sessionId);
+    swarmAgents.forEach(a => { a.connections = a.connections.filter(c => c !== agent.id); });
     swarmAgents.delete(agent.id);
     node.remove();
     renderSwarmConnections();
     updateSwarmEmptyState();
   });
 
-  // Output port — start drawing connection
-  const outputPort = node.querySelector(".swarm-port.output") as HTMLElement;
-  outputPort?.addEventListener("mousedown", (e) => {
-    e.stopPropagation();
-    connectingFrom = agent.id;
-    document.body.style.cursor = "crosshair";
-  });
-
-  // Input port — complete connection
-  const inputPort = node.querySelector(".swarm-port.input") as HTMLElement;
-  inputPort?.addEventListener("mouseup", (e) => {
-    e.stopPropagation();
-    if (connectingFrom && connectingFrom !== agent.id) {
-      const sourceAgent = swarmAgents.get(connectingFrom);
-      if (sourceAgent && !sourceAgent.connections.includes(agent.id)) {
-        sourceAgent.connections.push(agent.id);
-        renderSwarmConnections();
-      }
-    }
-    connectingFrom = null;
-    document.body.style.cursor = "";
-  });
-
-  // Double-click to open terminal in tab view
+  // Double-click to open terminal
   node.addEventListener("dblclick", () => {
     if (agent.sessionId) {
       exitSwarmView();
@@ -3120,6 +3195,152 @@ function createSwarmNode(agent: SwarmAgent) {
   });
 
   canvas.appendChild(node);
+}
+
+function createPromptNode(promptNode: SwarmNode) {
+  const canvas = document.getElementById("swarm-canvas")!;
+  const node = document.createElement("div");
+  node.className = "swarm-node";
+  node.id = `swarm-node-${promptNode.id}`;
+  node.style.left = `${promptNode.x}px`;
+  node.style.top = `${promptNode.y}px`;
+  node.style.borderColor = "rgba(245, 158, 11, 0.4)";
+  node.style.width = "220px";
+
+  node.innerHTML = `
+    <div class="swarm-node-header" style="background: rgba(245, 158, 11, 0.1);">
+      <div class="flex items-center space-x-2">
+        <span style="color: #f59e0b; font-size: 12px;">&#9998;</span>
+        <span class="text-sm font-semibold" style="color: #f59e0b;">Prompt</span>
+      </div>
+      <button class="swarm-node-delete text-gray-500 hover:text-red-400" style="background:none;border:none;cursor:pointer;font-size:14px;">&times;</button>
+    </div>
+    <div class="swarm-node-body" style="padding: 8px;">
+      <textarea class="prompt-node-text" style="width:100%;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:6px;color:#e5e7eb;font-size:11px;padding:6px;resize:vertical;min-height:50px;font-family:inherit;outline:none;" placeholder="Type your prompt here...">${promptNode.promptText || ""}</textarea>
+      <button class="prompt-send-btn" style="margin-top:6px;width:100%;background:rgba(245,158,11,0.15);border:1px solid rgba(245,158,11,0.3);color:#f59e0b;font-size:11px;padding:4px;border-radius:6px;cursor:pointer;transition:all 0.15s;">Send to connected agents</button>
+    </div>
+    <div class="swarm-port output" title="Connect to agents" style="border-color: #f59e0b; background: rgba(245,158,11,0.3);"></div>
+  `;
+
+  const header = node.querySelector(".swarm-node-header") as HTMLElement;
+  makeSwarmDraggable(node, promptNode, header);
+  addSwarmPorts(node, promptNode);
+
+  // Update text on input
+  node.querySelector(".prompt-node-text")?.addEventListener("input", (e) => {
+    promptNode.promptText = (e.target as HTMLTextAreaElement).value;
+  });
+
+  // Send button — sends text to all connected agent sessions
+  node.querySelector(".prompt-send-btn")?.addEventListener("click", () => {
+    const text = promptNode.promptText;
+    if (!text) return;
+    promptNode.connections.forEach(targetId => {
+      const target = swarmAgents.get(targetId);
+      if (target?.sessionId) {
+        ipcRenderer.send("session-input", target.sessionId, text + "\r");
+      }
+    });
+    // Flash the button
+    const btn = node.querySelector(".prompt-send-btn") as HTMLElement;
+    btn.textContent = "Sent!";
+    btn.style.background = "rgba(34, 197, 94, 0.2)";
+    btn.style.color = "#22c55e";
+    setTimeout(() => {
+      btn.textContent = "Send to connected agents";
+      btn.style.background = "rgba(245, 158, 11, 0.15)";
+      btn.style.color = "#f59e0b";
+    }, 1500);
+  });
+
+  node.querySelector(".swarm-node-delete")?.addEventListener("click", () => {
+    swarmAgents.forEach(a => { a.connections = a.connections.filter(c => c !== promptNode.id); });
+    swarmAgents.delete(promptNode.id);
+    node.remove();
+    renderSwarmConnections();
+    updateSwarmEmptyState();
+  });
+
+  canvas.appendChild(node);
+}
+
+function createOutputNode(outputNode: SwarmNode) {
+  const canvas = document.getElementById("swarm-canvas")!;
+  const node = document.createElement("div");
+  node.className = "swarm-node";
+  node.id = `swarm-node-${outputNode.id}`;
+  node.style.left = `${outputNode.x}px`;
+  node.style.top = `${outputNode.y}px`;
+  node.style.borderColor = "rgba(34, 197, 94, 0.4)";
+  node.style.width = "260px";
+
+  if (!outputNode.outputLog) outputNode.outputLog = [];
+
+  node.innerHTML = `
+    <div class="swarm-node-header" style="background: rgba(34, 197, 94, 0.1);">
+      <div class="flex items-center space-x-2">
+        <span style="color: #22c55e; font-size: 12px;">&#9745;</span>
+        <span class="text-sm font-semibold" style="color: #22c55e;">Output</span>
+      </div>
+      <button class="swarm-node-delete text-gray-500 hover:text-red-400" style="background:none;border:none;cursor:pointer;font-size:14px;">&times;</button>
+    </div>
+    <div class="swarm-node-body output-log-body" style="padding: 6px; max-height: 200px; overflow-y: auto;">
+      <div class="output-log-entries" style="font-size: 11px; color: #9ca3af;">
+        ${outputNode.outputLog.length === 0 ? '<div style="color: #4b5563; font-style: italic;">Waiting for agent output...</div>' : ""}
+      </div>
+      <div class="output-comment-section" style="margin-top: 6px; display: none;">
+        <textarea class="output-comment-input" style="width:100%;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:4px;color:#d1d5db;font-size:10px;padding:4px;resize:none;height:30px;font-family:inherit;outline:none;" placeholder="Add a comment..."></textarea>
+      </div>
+    </div>
+    <div class="swarm-port input" title="Receive output from agents" style="border-color: #22c55e; background: rgba(34,197,94,0.3);"></div>
+  `;
+
+  const header = node.querySelector(".swarm-node-header") as HTMLElement;
+  makeSwarmDraggable(node, outputNode, header);
+  addSwarmPorts(node, outputNode);
+
+  node.querySelector(".swarm-node-delete")?.addEventListener("click", () => {
+    swarmAgents.forEach(a => { a.connections = a.connections.filter(c => c !== outputNode.id); });
+    swarmAgents.delete(outputNode.id);
+    node.remove();
+    renderSwarmConnections();
+    updateSwarmEmptyState();
+  });
+
+  canvas.appendChild(node);
+}
+
+function appendToOutputNode(nodeId: string, agentName: string, summary: string) {
+  const outputNode = swarmAgents.get(nodeId);
+  if (!outputNode || outputNode.type !== "output") return;
+  if (!outputNode.outputLog) outputNode.outputLog = [];
+
+  const timestamp = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const entry = `[${timestamp}] ${agentName}: ${summary}`;
+  outputNode.outputLog.push(entry);
+
+  const nodeEl = document.getElementById(`swarm-node-${nodeId}`);
+  if (!nodeEl) return;
+
+  const logBody = nodeEl.querySelector(".output-log-entries");
+  if (logBody) {
+    // Clear "waiting" message
+    if (outputNode.outputLog.length === 1) logBody.innerHTML = "";
+
+    const div = document.createElement("div");
+    div.style.cssText = "padding: 4px 0; border-bottom: 1px solid rgba(255,255,255,0.04); line-height: 1.4;";
+    div.innerHTML = `
+      <span style="color: #6b7280; font-size: 10px;">${timestamp}</span>
+      <span style="color: #8b5cf6; font-weight: 600; font-size: 10px;">${agentName}</span>
+      <div style="color: #c9d1d9; font-size: 11px; margin-top: 2px; white-space: pre-wrap; word-break: break-word;">${summary.slice(0, 200)}${summary.length > 200 ? "..." : ""}</div>
+    `;
+    logBody.appendChild(div);
+    logBody.scrollTop = logBody.scrollHeight;
+  }
+
+  // Show comment section
+  const commentSection = nodeEl.querySelector(".output-comment-section") as HTMLElement;
+  if (commentSection) commentSection.style.display = "block";
 }
 
 function renderSwarmConnections() {
@@ -3199,6 +3420,44 @@ function openAddAgentModal() {
 document.getElementById("swarm-add-agent")?.addEventListener("click", openAddAgentModal);
 document.getElementById("swarm-get-started")?.addEventListener("click", openAddAgentModal);
 
+// Add Prompt node
+document.getElementById("swarm-add-prompt")?.addEventListener("click", () => {
+  const count = Array.from(swarmAgents.values()).filter(a => a.type === "prompt").length;
+  const promptNode: SwarmNode = {
+    id: `prompt-${Date.now()}`,
+    type: "prompt",
+    name: "Prompt",
+    sessionId: null,
+    x: 60 + count * 30,
+    y: 80 + count * 30,
+    projectDir: "",
+    promptText: "",
+    connections: [],
+  };
+  swarmAgents.set(promptNode.id, promptNode);
+  createSwarmNode(promptNode);
+  updateSwarmEmptyState();
+});
+
+// Add Output node
+document.getElementById("swarm-add-output")?.addEventListener("click", () => {
+  const count = Array.from(swarmAgents.values()).filter(a => a.type === "output").length;
+  const outputNode: SwarmNode = {
+    id: `output-${Date.now()}`,
+    type: "output",
+    name: "Output",
+    sessionId: null,
+    x: 500 + count * 30,
+    y: 80 + count * 30,
+    projectDir: "",
+    outputLog: [],
+    connections: [],
+  };
+  swarmAgents.set(outputNode.id, outputNode);
+  createSwarmNode(outputNode);
+  updateSwarmEmptyState();
+});
+
 document.getElementById("swarm-agent-browse")?.addEventListener("click", async () => {
   const dir = await ipcRenderer.invoke("select-directory");
   if (dir) {
@@ -3223,8 +3482,9 @@ document.getElementById("swarm-agent-create")?.addEventListener("click", async (
 
   // Place node at a staggered position
   const count = swarmAgents.size;
-  const agent: SwarmAgent = {
+  const agent: SwarmNode = {
     id: agentId,
+    type: "agent",
     name,
     sessionId: null,
     x: 80 + (count % 3) * 240,
@@ -3394,10 +3654,15 @@ function setupSwarmRouting() {
         }
 
         if (lines.length > 0) {
-          const summary = lines.slice(-5).join("\\n");
+          const summary = lines.slice(-5).join("\n");
           agent.connections.forEach(targetId => {
             const target = swarmAgents.get(targetId);
-            if (target?.sessionId) {
+            if (!target) return;
+            if (target.type === "output") {
+              // Send to output node as a log entry
+              appendToOutputNode(targetId, agent.name, summary);
+            } else if (target.sessionId) {
+              // Send to agent session as input
               const msg = `[From ${agent.name}]: ${summary}`;
               ipcRenderer.send("session-input", target.sessionId, msg + "\r");
             }

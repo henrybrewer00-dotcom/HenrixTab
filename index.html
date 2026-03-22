@@ -83,7 +83,9 @@
           <div id="swarm-toolbar" class="flex items-center justify-between px-3 py-1" style="background: rgba(139,92,246,0.06); border-bottom: 1px solid rgba(139,92,246,0.12);">
             <div class="flex items-center space-x-3">
               <span class="text-sm text-gray-300 font-medium">Swarm Canvas</span>
-              <button id="swarm-add-agent" class="text-xs px-2 py-1 rounded-md transition" style="background: rgba(139,92,246,0.2); color: #a78bfa; border: 1px solid rgba(139,92,246,0.3);">+ Add Agent</button>
+              <button id="swarm-add-agent" class="text-xs px-2 py-1 rounded-md transition" style="background: rgba(139,92,246,0.2); color: #a78bfa; border: 1px solid rgba(139,92,246,0.3);">+ Agent</button>
+          <button id="swarm-add-prompt" class="text-xs px-2 py-1 rounded-md transition" style="background: rgba(245,158,11,0.15); color: #f59e0b; border: 1px solid rgba(245,158,11,0.3);">+ Prompt</button>
+          <button id="swarm-add-output" class="text-xs px-2 py-1 rounded-md transition" style="background: rgba(34,197,94,0.15); color: #22c55e; border: 1px solid rgba(34,197,94,0.3);">+ Output</button>
             </div>
             <div class="flex items-center space-x-2">
               <button id="swarm-grid-view" class="text-xs text-gray-400 hover:text-white px-2 py-1 rounded-md transition" style="background: rgba(255,255,255,0.06);">Grid View</button>
@@ -98,14 +100,18 @@
                 <div style="text-align: center; max-width: 400px; animation: fadeIn 0.4s ease-out;">
                   <div style="font-size: 48px; margin-bottom: 12px; opacity: 0.15;">&#128376;</div>
                   <h2 style="color: #a78bfa; font-size: 22px; font-weight: 700; margin-bottom: 8px;">Swarm Mode</h2>
-                  <p style="color: #6b7280; font-size: 13px; line-height: 1.6; margin-bottom: 20px;">
-                    Create AI agents, place them on the canvas, and connect them together.
-                    When one agent finishes, its output flows to the next. Build chains, fan-outs,
-                    or full orchestration graphs.
+                  <p style="color: #6b7280; font-size: 13px; line-height: 1.6; margin-bottom: 6px;">
+                    Build AI agent workflows visually. Add <span style="color:#a78bfa;">Agents</span>,
+                    <span style="color:#f59e0b;">Prompts</span>, and <span style="color:#22c55e;">Outputs</span>
+                    to the canvas, then connect them together.
                   </p>
-                  <button id="swarm-get-started" class="btn-primary" style="padding: 8px 24px;">+ Add Your First Agent</button>
+                  <p style="color: #6b7280; font-size: 12px; line-height: 1.5; margin-bottom: 20px;">
+                    Prompts feed instructions into agents. Agents do the work. Outputs collect the results.
+                    When one agent finishes, its output flows to the next connected node.
+                  </p>
+                  <button id="swarm-get-started" class="btn-primary" style="padding: 8px 24px;">Get Started</button>
                   <div style="margin-top: 16px; color: #4b5563; font-size: 11px;">
-                    Drag nodes to position &middot; Connect output &#8594; input ports &middot; Double-click to open terminal
+                    Drag to move &middot; Connect ports &#8594; &middot; Double-click agent to open terminal &middot; Click connection to remove
                   </div>
                 </div>
               </div>
